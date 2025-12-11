@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright © 2025 The Dymes project authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Protect the protection
+/.github/CODEOWNERS @dymes-io/core
+
+# Catch-all
+* @dymes-io/core
+
+# Common
+/src/dymes_common/ @dymes-io/common
+/src/dymes_common.zig @dymes-io/common
+
+# HTTP
+/src/dymes_http/ @dymes-io/http
+/src/dymes_http.zig @dymes-io/http
+
+# Client
+/src/dymes_client/ @dymes-io/client
+/src/dymes_client.zig @dymes-io/client
+
+# Engine and message stores
+/src/dymes_engine/ @dymes-io/engine
+/src/dymes_engine.zig  @dymes-io/engine
+/src/dymes_msg/  @dymes-io/engine
+/src/dymes_msg.zig  @dymes-io/engine
+/src/dymes_msg_store/  @dymes-io/engine
+/src/dymes_msg_store.zig  @dymes-io/engine
+/src/dymes_workshop.zig  @dymes-io/engine
+
+# VSR
+/src/dymes_vsr/ @dymes-io/vsr
+/src/dymes_vsr.zig @dymes-io/vsr
+/src/dymes_vsr_sim.zig @dymes-io/vsr
+
+# Daemons
+/src/dymes_node.zig @dymes-io/daemons
+
+# Tooling
+/src/dymes_dde.zig @dymes-io/tooling
+/src/dymes_ddi.zig @dymes-io/tooling
+/src/dymes_ddt.zig @dymes-io/tooling
+/src/dymes_stress.zig @dymes-io/tooling

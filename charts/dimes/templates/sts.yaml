@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: Copyright © 2025 The Dymes project authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ template "fullname" . }}
+  labels:
+    app: {{ template "fullname" . }}
+    app.kubernetes.io/name: {{ .Values.service.name }}
+    app.kubernetes.io/instance: {{ template "fullname" . }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion }}
+    app.kubernetes.io/component: {{ .Values.service.tier }}
+    app.kubernetes.io/part-of: {{ .Values.service.product }}
+    app.dymes.io/mode: {{ .Values.service.mode }}
+    app.dymes.io/daemon-version: {{ .Chart.AppVersion }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ template "fullname" . }}
+  replicas: {{ .Values.replicaCount }}
+{{/*  strategy:*/}}
+{{/*    type: Recreate*/}}
+  template:
+    metadata:
+      labels:
+        app: {{ template "fullname" . }}
+        app.kubernetes.io/name: {{ .Values.service.name }}
+        app.kubernetes.io/instance: {{ template "fullname" . }}
+        app.kubernetes.io/version: {{ .Chart.AppVersion }}
+        app.kubernetes.io/component: {{ .Values.service.tier }}
+        app.kubernetes.io/part-of: {{ .Values.service.product }}
+        tier: backend
+{{- if .Values.podAnnotations }}
+      annotations:
+{{ toYaml .Values.podAnnotations | indent 8 }}
+{{- end }}
+    spec:
+      {{- if .Values.serviceAccountName }}
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          {{- if .Values.imageReference }}
+          image: "{{ .Values.imageReference }}"
+          {{- else }}
+          image: "{{ .Values.image.repository }}/{{ .Chart.Name }}:{{ .Chart.Version }}"
+          {{- end }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: {{ .Values.service.envVarName }}_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: {{ .Values.service.envVarName }}_NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: {{ .Values.service.envVarName }}_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: {{ .Values.service.envVarName }}_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: {{ .Values.service.envVarName }}_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: {{ .Values.service.envVarName }}_SERVICE_ACCOUNT
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.serviceAccountName
+            {{- include "env" .Values | indent 12 }}
+          ports:
+            - containerPort: {{ .Values.service.internalPort }}
+          envFrom:
+            - configMapRef:
+                name: configuration-service-config
+                optional: true
+          {{- if .Values.startup }}
+          startupProbe:
+            {{- include "probe" .Values.startup | indent 12 -}}
+          {{- end }}
+          {{- if .Values.liveness }}
+          livenessProbe:
+            {{- include "probe" .Values.liveness | indent 12 -}}
+          {{- end }}
+          {{- if .Values.readiness }}
+          readinessProbe:
+            {{- include "probe" .Values.readiness | indent 12 -}}
+          {{- end }}
+          {{- if .Values.volumeMounts }}
+          volumeMounts:
+          {{- include "volume-mounts" .Values | indent 12 }}
+          {{- end }}
+          resources:
+          {{- toYaml .Values.resources | nindent 12 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- if .Values.volumes }}
+      volumes:
+      {{- include "volumes" .Values | indent 12 }}
+      {{- end }}
+  volumeClaimTemplates:
+  - metadata:
+      name: dymes-storage
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: {{ .Values.storageCapacity }}
+      {{- if .Values.storageClassName}}
+      storageClassName: {{ .Values.storageClassName }}
+      {{- end }}

@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright © 2025 The Dymes project authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+suite: test service
+templates:
+  - service.yaml
+tests:
+  - it: should render service with defaults
+    asserts:
+      - isKind:
+          of: Service
+      - equal:
+          path: metadata.name
+          value: dymes
+      - contains:
+          path: spec.ports
+          content:
+            port: 80
+            targetPort: 6510
+            protocol: TCP
+            name: http
+      - equal:
+          path: spec.type
+          value: ClusterIP
+      - equal:
+          path: spec.selector.app
+          value: RELEASE-NAME-dymes
+  - it: should override values
+    set:
+      service:
+        name: foo
+        externalPort: 443
+        internalPort: 8443
+    asserts:
+      - equal:
+          path: metadata.name
+          value: foo
+      - contains:
+          path: spec.ports
+          content:
+            port: 443
+            targetPort: 8443
+            protocol: TCP
+            name: http

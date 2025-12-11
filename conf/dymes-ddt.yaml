@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright © 2025 The Dymes project authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+engine:
+  logging:
+    level: fine
+    format: text
+
+  store:
+    id: 102
+    data_path: "zig-out/ddt-data"

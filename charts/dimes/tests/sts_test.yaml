@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: Copyright © 2025 The Dymes project authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+suite: test stateful set
+templates:
+  - sts.yaml
+tests:
+  - it: should render a default StatefulSet
+    asserts:
+      - isKind:
+          of: StatefulSet
+      - notExists:
+          path: spec.template.spec.serviceAccountName
+      - equal:
+          path: spec.template.spec.containers[0].name
+          value: dymes
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: draft/dymes:0.0.0
+  - it: should set the image repository
+    set:
+      image:
+        repository: https://repo.dymes.io
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: https://repo.dymes.io/dymes:0.0.0
+  - it: should set env vars
+    set:
+      env:
+        JAVA_TOOL_OPTIONS: -XX:+UseZGC
+        ANOTHER_VAR: foo
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: JAVA_TOOL_OPTIONS
+            value: -XX:+UseZGC
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: ANOTHER_VAR
+            value: foo
+  - it: should set the service account
+    set:
+      serviceAccountName: dymes-sa
+    asserts:
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: dymes-sa
+  - it: should render env vars from secrets
+    set:
+      secrets:
+        hsm-password:
+          type: env
+          keys:
+            - key_name: password
+              env_name: KEY_dash_STORE_dash_GENERATOR_CLOUD_dash_HSM_PASSWORD
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KEY_dash_STORE_dash_GENERATOR_CLOUD_dash_HSM_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: password
+                name: hsm-password
+  - it: should render volumes
+    set:
+      volumes:
+        hsm-cu-user-password:
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: "hsm-cu-user-password"
+        hsm-client-ca-cert:
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: "hsm-client-ca-cert"
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: hsm-client-ca-cert
+            csi:
+              driver: secrets-store.csi.k8s.io
+              readOnly: true
+              volumeAttributes:
+                secretProviderClass: hsm-client-ca-cert
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: hsm-client-ca-cert
+            csi:
+              driver: secrets-store.csi.k8s.io
+              readOnly: true
+              volumeAttributes:
+                secretProviderClass: "hsm-client-ca-cert"
+  - it: should render the default volume mount for the application container
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: dymes-storage
+            mountPath: /var/dymes/data
+  - it: should render volume mounts for the application container
+    set:
+      volumeMounts:
+        hsm-cu-user-password:
+          mountPath: /app/secret/hsm-cu-user-password
+        hsm-client-ca-cert:
+          mountPath: /app/secret/hsm-client-ca-cert
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: hsm-client-ca-cert
+            mountPath: /app/secret/hsm-client-ca-cert
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: hsm-cu-user-password
+            mountPath: /app/secret/hsm-cu-user-password

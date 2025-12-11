@@ -1,0 +1,19 @@
+---
+title: "Dymes Message Header"
+config:
+  look: handDrawn
+  theme: neutral
+---
+packet-beta
+0-127: "Header Checksum"
+128-192: "Log sequence number (LSN)"
+192-255: Reserved
+256-383: "Message ULID"
+384-511: "Correlation ULID"
+512-639: "Channel Id"
+640-767: "Routing data"
+768-799: "Frame Size"
+800-831: "KV Header Count"
+832-863: "KV Header Data Size"
+864-895: "Content Data Size"
+896-1023: "Payload Checksum"

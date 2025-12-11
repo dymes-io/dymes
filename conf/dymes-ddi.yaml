@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright © 2025 The Dymes project authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+importer:
+  logging:
+    level: debug
+    format: text
+
+  client:
+    host: "localhost"
+    port: 6510

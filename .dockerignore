@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright © 2025 The Dymes project authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+#zig-out
+ext
+.git
+.gitignore
+.gitmodules
+README.md
+.env
+.env.*
+.vscode
+.sublime-project
+.idea
+*.md
+.DS_Store
+vendor
+tmp
+*.log

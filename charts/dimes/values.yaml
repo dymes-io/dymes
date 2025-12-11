@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright © 2025 The Dymes project authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+replicaCount: 1
+image:
+  repository: draft
+  tag: dev
+  pullPolicy: Always
+
+env:
+  DYMES_INSIDE_K8S: "true"
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/scheme: "http"
+  prometheus.io/path: "/observe/metrics"
+  prometheus.io/port: "6502"
+
+service:
+  name: dymes
+  mode: "single"
+  envVarName: DYMES
+  type: ClusterIP
+  externalPort: 80
+  internalPort: 6510
+  tier: backend
+  product: dymes
+
+resources:
+  limits:
+    #    cpu: 2000m
+    memory: 2Gi
+  requests:
+    cpu: 600m
+    memory: 1Gi
+
+startup:
+  httpGet:
+    port: 6510
+    path: /observe/health/live
+  periodSeconds: 30
+  failureThreshold: 10
+  timeoutSeconds: 1
+liveness:
+  httpGet:
+    port: 6510
+    path: /observe/health/live
+  periodSeconds: 30
+  successThreshold: 1
+  timeoutSeconds: 1
+readiness:
+  httpGet:
+    port: 6510
+    path: /observe/health/ready
+  periodSeconds: 10
+  successThreshold: 1
+  timeoutSeconds: 1
+
+#storageClassName: standard
+storageCapacity: 60Gi
+
+volumeMounts:
+  dymes-storage:
+    mountPath: /var/dymes/data

@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright © 2025 The Dymes project authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+stress:
+
+  num_messages: 10000
+  iterations: 10
+
+  logging:
+    level: fine
+    format: text
+
+  http:
+    host: "127.0.0.1"
+    port: 6510
+
