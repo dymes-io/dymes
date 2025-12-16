@@ -4,7 +4,7 @@ SPDX-FileCopyrightText: Copyright © 2025 The Dymes project authors
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# dymes
+# Dymes
 
 Distributed Yet Minimal Event Sourcing
 
