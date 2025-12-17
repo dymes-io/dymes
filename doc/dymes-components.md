@@ -4,14 +4,35 @@ SPDX-FileCopyrightText: Copyright © 2025 The Dymes project authors
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Dymes Subsystems
+# Dymes Components
 
-The Dymes subsystems can be broadly categorized as follows:
+The Dymes components can be broadly categorized as follows:
 
 - [Libraries](#dymes-libraries)
 - [Command line tooling](#dymes-cli-tooling)
 - [Service Daemons](#dymes-service-daemons)
 
+```mermaid
+mindmap
+Dymes
+    Libraries
+        dymes_engine["Engine"]
+        dymes_http["HTTP"]
+        dymes_vsr["VSR"]
+        dymes_client["Client"]
+        dymes_msg["Message"]
+        dymes_msg_store["Message Store"]
+        dymes_common["Common"]
+    Command line tooling
+        dymes_dde["Data Exporter"]
+        dymes_ddi["Data Importer"]
+        dymes_vsr_sim["VSR Simulator"]
+        dymes_workshop["Workshop"]
+        dymes_stress["Stress Tool"]
+    Service Daemons
+        dymes_node["Node"]
+        dymes_dme["Metrics Exporter"]
+```
 
 ---
 ## Dymes Libraries
@@ -31,15 +52,15 @@ block-beta
 
 The Dymes libraries are intended to be as self-contained as possible while remaining loosely coupled. This allows library mixing-and-matching as required.
 
-| Library                                 | Description                                                                              |
-|-----------------------------------------|------------------------------------------------------------------------------------------|
-| [Common](#common-library)               | Domain-agnostic data structures and utility functions                                    |
-| [Message](#message-library)             | Defines message limits, headers, substructures and builders                              |
-| [Message Store](#message-store-library) | Defines storage limits, data segments, datasets, file formats (data, index and journal)  |
-| [Engine](#engine-library)               | Binds the append and immutable stores together, exposing ingress and query functionality |
-| [HTTP](#http-library)                   | An HTTP server with endpoints bound to health, ingress and query support                 |
-| [Client](#client-library)               | A minimal HTTP client for testing purposes                                               |
-| [VSR](#vsr-library)                     | A no-frills implementation of Viewstamped Replication (Revisited)                        |
+| Library                                 | Description                                                                                           |
+|-----------------------------------------|-------------------------------------------------------------------------------------------------------|
+| [Common](#common-library)               | Domain-agnostic data structures and utility functions                                                 |
+| [Message](#message-library)             | Defines message limits, headers, substructures and builders                                           |
+| [Message Store](#message-store-library) | Defines storage limits, data segments, datasets, file formats (data, index and journal)               |
+| [Engine](#engine-library)               | Binds the append and immutable stores together, exposing ingress and query functionality              |
+| [HTTP](#http-library)                   | An HTTP server with endpoints bound to health, ingress and query support                              |
+| [Client](#client-library)               | A minimal HTTP client for testing purposes                                                            |
+| [VSR](#vsr-library)                     | A no-frills implementation of [Viewstamped Replication (Revisited)](http://www.pmg.csail.mit.edu/vr/) |
 
 
 ---
@@ -148,7 +169,7 @@ flowchart TD
     dymes_vsr["VSR"] --> dymes_common["Common"]
 ```
 
-The VSR library (`dymes_vsr`) provides a no-frills implementation of Viewstamped Replication (Revisited).
+The VSR library (`dymes_vsr`) provides a no-frills implementation of [Viewstamped Replication (Revisited)](http://www.pmg.csail.mit.edu/vr/).
 
 > This is under active development and not yet complete (missing support for `GetState` and `NewState`)
 

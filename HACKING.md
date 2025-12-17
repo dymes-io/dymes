@@ -5,40 +5,58 @@ SPDX-License-Identifier: Apache-2.0
 -->
 # Developing Dymes
 
-## Pre-requisites
+## Components
 
-### zig 0.15.2
-
-See the [Zig Download](https://ziglang.org/download/) page for details.
-
-#### macOS
-
-```sh
-brew install zig
+```mermaid
+mindmap
+Dymes
+    Libraries
+        dymes_engine["Engine"]
+        dymes_http["HTTP"]
+        dymes_vsr["VSR"]
+        dymes_client["Client"]
+        dymes_msg["Message"]
+        dymes_msg_store["Message Store"]
+        dymes_common["Common"]
+    Command line tooling
+        dymes_dde["Data Exporter"]
+        dymes_ddi["Data Importer"]
+        dymes_vsr_sim["VSR Simulator"]
+        dymes_workshop["Workshop"]
+        dymes_stress["Stress Tool"]
+    Service Daemons
+        dymes_node["Node"]
+        dymes_dme["Metrics Exporter"]
 ```
 
-#### Linux
+Refer to [Dymes Components](./doc/dymes-components.md) for more detail on the libraries, tools and daemons comprising Dymes.
 
-##### Alpine Linux
+---
+## Development Tooling
 
-```sh
-apk add zig
+```mermaid
+mindmap
+Developer Tooling
+    Building
+        zig["Zig 0.15.2"]
+        container["OCI runtime"]
+            podman["Podman"]
+            docker["Docker Engine"]
+    Local clustering
+        helm["Helm"]
+        kubectl["Kubernetes CLI"]
+        sops["SOPS"]
+        age["AGE"]
+        kind["Kind"]
+        tilt["Tilt"]
 ```
 
-### Podman/Docker
+Refer to [Development Tooling](./doc/dev-tooling.md) for more detail on the prerequisite libraries, and tools required for Dymes development.
 
-#### macOS
+---
+## Building and running locally
 
-- Podman/Docker Desktop
-- Use `containerd`
-
-#### Linux
-
-- Podman/Docker Engine with `containerd`
-
-### Local build
-
-#### Build Dymes and run unit tests
+### Build Dymes and run unit tests
 
 ```sh
 make
@@ -51,21 +69,19 @@ zig build test -freference-trace --summary all
 ```
 
 
-#### Running Dymes locally
+### Run a local node
 
 ```sh
 zig build run
 ```
 
-
-#### Running Dymes stress client
+### Stress the local node
 
 ```sh
 zig build stress
 ```
 
-### Docker
-
+### Build local container image
 
 ```sh
 make oci
@@ -80,7 +96,7 @@ scripts/build-oci.sh
 #### Running interactive using the Docker image
 
 ```sh
-podman run --rm -v ./zig-out/dymes-data:/var/dymes/data -p 6510:6510 -it dymes:latest
+podman run --rm -p 6510:6510 -it dymes:latest
 ```
 
 #### Running as daemon using the Docker image
@@ -89,7 +105,11 @@ podman run --rm -v ./zig-out/dymes-data:/var/dymes/data -p 6510:6510 -it dymes:l
 podman run --name dymes -v ./zig-out/dymes-data:/var/dymes/data -p 6510:6510 -d dymes:latest
 ```
 
-#### Building in a pipeline
+#### Building release images
+
+```shell
+scripts/build-release.sh
+```
 
 This builds images for:
 
