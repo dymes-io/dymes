@@ -5,6 +5,21 @@ SPDX-License-Identifier: Apache-2.0
 -->
 # Developing Dymes
 
+<!-- TOC -->
+* [Developing Dymes](#developing-dymes)
+  * [Components](#components)
+  * [Development Tooling](#development-tooling)
+  * [Building and running locally](#building-and-running-locally)
+    * [Build Dymes and run unit tests](#build-dymes-and-run-unit-tests)
+    * [Run a local node](#run-a-local-node)
+    * [Stress the local node](#stress-the-local-node)
+    * [Build local container image](#build-local-container-image)
+      * [Running interactive using the Docker image](#running-interactive-using-the-docker-image)
+      * [Running as daemon using the Docker image](#running-as-daemon-using-the-docker-image)
+      * [Building release images](#building-release-images)
+    * [Dymes HTTP](#dymes-http)
+<!-- TOC -->
+
 ## Components
 
 ```mermaid

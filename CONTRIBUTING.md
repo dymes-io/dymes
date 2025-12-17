@@ -6,18 +6,21 @@ SPDX-License-Identifier: Apache-2.0
 
 # Contributing to the Dymes project
 
+<!-- TOC -->
+* [Contributing to the Dymes project](#contributing-to-the-dymes-project)
+  * [Code of Conduct](#code-of-conduct-)
+  * [Reporting Bugs](#reporting-bugs-)
+  * [Pull Requests](#pull-requests-)
+  * [Commit Guidelines](#commit-guidelines-)
+  * [Developer's Certificate of Origin (DCO)](#developers-certificate-of-origin-dco)
+<!-- TOC -->
+
 ## Code of Conduct ##
 
-Please adhere to the Dymes [code of conduct](./CODE_OF_CONDUCT.md) when interacting with
-others in the project.
+Please adhere to the Dymes [code of conduct](./CODE_OF_CONDUCT.md) when contributing code or interacting
+with others in the project.
 
-## Strict No LLM / No AI Policy
-
-No LLMs for issues.
-
-No LLMs for pull requests.
-
-No LLMs for comments on the bug tracker, including translation. English is encouraged, but not required. You are welcome to post in your native language and rely on others to have their own translation tools of choice to interpret your words.
+TLDR: Do your own work, and try to be nice to others.
 
 ## Reporting Bugs ##
 
@@ -68,7 +71,7 @@ Please follow the [Commit Message Guidelines](./CONVENTIONS.md#commit-message-gu
 messages following the structure:
 
 ```
-    <type>(subsystem): <summary>
+    <type>(component): <summary>
     [optional body]
 ```
 

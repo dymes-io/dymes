@@ -6,6 +6,21 @@ SPDX-License-Identifier: Apache-2.0
 
 # Dymes Conventions
 
+<!-- TOC -->
+* [Dymes Conventions](#dymes-conventions)
+  * [Coding Conventions](#coding-conventions)
+    * [Whitespace](#whitespace)
+    * [Naming](#naming)
+      * [General rules of thumb](#general-rules-of-thumb)
+      * [Types, functions and variables](#types-functions-and-variables)
+    * [Formatting and indentation](#formatting-and-indentation)
+  * [Commit Message Guidelines](#commit-message-guidelines)
+    * [Commit message type](#commit-message-type)
+    * [Commit message component/subsystem](#commit-message-componentsubsystem)
+    * [Commit message summary](#commit-message-summary)
+    * [Commit message body](#commit-message-body)
+<!-- TOC -->
+
 ## Coding Conventions
 
 The Dymes coding conventions match those applied to the primary Zig codebase and standard library.
@@ -56,7 +71,7 @@ The Dymes commit guidelines are largely based on the [Conventional Commits](http
 The commit message structure is as follows:
 
 ```
-    <type>(subsystem): <summary>
+    <type>(component): <summary>
     [optional body]
 ```
 
@@ -76,12 +91,12 @@ Commit type must be one of the following:
 | test        | Adding or fixing tests                                                          |
 | ops         | Ops-related, such as Terraform, k8s or helm changes                             |
 
-### Commit message subsystem
+### Commit message component/subsystem
 
-This indicates which subsystem in particular was affected by
+This indicates which component or subsystem in particular was affected by
 the change, otherwise a cross-cutting change is assumed.
 
-Dymes subsystems:
+Dymes components:
 
 | Subsystem   | Description                                                                     |
 |-------------|---------------------------------------------------------------------------------|
@@ -93,6 +108,14 @@ Dymes subsystems:
 | http        | HTTP support                                                                    |
 | vsr         | Viewstamped Replication                                                         |
 | tooling     | Dymes data exporter, importer, etc                                              |
+
+You may also be more specific regarding component, for example, a fix in the VSR transport subsystem could
+have a commit message starting like this:
+
+```
+fix(vsr.transport): Fixed buffer overallocation during...
+```
+
 
 ### Commit message summary
 

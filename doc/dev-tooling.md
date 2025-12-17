@@ -23,6 +23,24 @@ Developer Tooling
         tilt["Tilt"]
 ```
 
+<!-- TOC -->
+* [Development Tooling](#development-tooling)
+  * [Zig 0.15.2](#zig-0152)
+    * [Installing Zig on macOS](#installing-zig-on-macos)
+    * [Installing Zig on Linux](#installing-zig-on-linux)
+      * [Alpine Linux](#alpine-linux)
+  * [OCI runtime (Podman/Docker)](#oci-runtime-podmandocker)
+    * [macOS](#macos)
+    * [Linux](#linux)
+  * [Helm](#helm)
+  * [Kubernetes CLI](#kubernetes-cli)
+  * [SOPS](#sops)
+  * [AGE](#age)
+  * [Kind](#kind)
+  * [Tilt](#tilt)
+<!-- TOC -->
+
+
 ## [Zig 0.15.2](https://ziglang.org/download/)
 
 See the [Zig Download](https://ziglang.org/download/) page for details.
@@ -85,7 +103,7 @@ A simple, modern and secure encryption tool (and Go library) with small explicit
 brew install age
 ```
 
-### [Kind](https://kind.sigs.k8s.io)
+## [Kind](https://kind.sigs.k8s.io)
 
 Kubernetes inside Docker.
 
@@ -93,7 +111,7 @@ Kubernetes inside Docker.
 brew install kind
 ```
 
-### [Tilt](https://tilt.dev)
+## [Tilt](https://tilt.dev)
 
 A toolkit for fixing the pains of microservice development.
 

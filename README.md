@@ -42,11 +42,11 @@ See [Hacking](./HACKING.md) for information on developing Dymes, bearing in mind
 
 ## Important concepts for usage
 
-See [Dymes Usage Concepts](./doc/dymes-usage-concepts.md)
+See [Dymes Usage Concepts](doc/dymes-msg-concepts.md)
 
 ## Roadmap
 
-> PLACEHOLDER
+> Under construction
 
 ## Dependencies
 

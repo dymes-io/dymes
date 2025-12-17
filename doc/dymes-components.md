@@ -6,12 +6,6 @@ SPDX-License-Identifier: Apache-2.0
 
 # Dymes Components
 
-The Dymes components can be broadly categorized as follows:
-
-- [Libraries](#dymes-libraries)
-- [Command line tooling](#dymes-cli-tooling)
-- [Service Daemons](#dymes-service-daemons)
-
 ```mermaid
 mindmap
 Dymes
@@ -34,8 +28,31 @@ Dymes
         dymes_dme["Metrics Exporter"]
 ```
 
+<!-- TOC -->
+* [Dymes Components](#dymes-components)
+  * [Dymes Libraries](#dymes-libraries)
+    * [Common library](#common-library)
+    * [Message library](#message-library)
+    * [Message store library](#message-store-library)
+    * [Engine library](#engine-library)
+    * [HTTP library](#http-library)
+    * [Client library](#client-library)
+    * [VSR library](#vsr-library)
+  * [Dymes CLI Tooling](#dymes-cli-tooling)
+    * [Data Exporter](#data-exporter)
+    * [Data Importer](#data-importer)
+    * [VSR Simulator](#vsr-simulator)
+    * [Workshop](#workshop)
+    * [Stress Tool](#stress-tool)
+  * [Dymes Service Daemons](#dymes-service-daemons)
+    * [Node](#node)
+    * [Metrics Exporter](#metrics-exporter)
+<!-- TOC -->
+
 ---
 ## Dymes Libraries
+
+The Dymes libraries are intended to be as self-contained as possible while remaining loosely coupled. This allows library mixing-and-matching as required.
  
 ```mermaid
 block-beta
@@ -50,7 +67,6 @@ block-beta
 
 ```
 
-The Dymes libraries are intended to be as self-contained as possible while remaining loosely coupled. This allows library mixing-and-matching as required.
 
 | Library                                 | Description                                                                                           |
 |-----------------------------------------|-------------------------------------------------------------------------------------------------------|
@@ -66,12 +82,13 @@ The Dymes libraries are intended to be as self-contained as possible while remai
 ---
 ### Common library
 
+The common library (`dymes_common`) contains domain-agnostic data structures and utility functions.
+
 ```mermaid
 flowchart LR
     dymes_common["Common"]
 ```
 
-The common library (`dymes_common`) contains domain-agnostic data structures and utility functions.
 
 - Common limits, constants, and errors
 - Utility functions (checksums, base64, networking, etc.)
@@ -84,12 +101,13 @@ The common library (`dymes_common`) contains domain-agnostic data structures and
 ---
 ### Message library
 
+The message library (`dymes_msg`) defines message limits, headers, substructures and builders.
+
 ```mermaid
 flowchart LR
     dymes_msg["Message"] --> dymes_common["Common"]
 ```
 
-The message library (`dymes_msg`) defines message limits, headers, substructures and builders.
 
 - Message limits, constants and headers
 - Message structure with builder
@@ -99,13 +117,14 @@ The message library (`dymes_msg`) defines message limits, headers, substructures
 ---
 ### Message store library
 
+The message store library (`dymes_msg_store`) defines storage limits, data segments, datasets, file formats (data, index and journal) and more.
+
 ```mermaid
 flowchart LR
     dymes_msg_store["Message Store"] --> dymes_msg["Message"]
     dymes_msg_store["Message Store"] --> dymes_common["Common"]
 ```
 
-The message store library (`dymes_msg_store`) defines storage limits, data segments, datasets, file formats (data, index and journal) and more. 
 
 - Storage limits, constants and errors
 - Dataset and segment management
@@ -118,6 +137,8 @@ The message store library (`dymes_msg_store`) defines storage limits, data segme
 ---
 ### Engine library
 
+The engine library (`dymes_engine`) binds the append and immutable stores together, exposing ingress and query functionality.
+
 ```mermaid
 flowchart TD
     dymes_engine["Engine"] --> dymes_msg_store["Message Store"]
@@ -125,8 +146,6 @@ flowchart TD
     dymes_engine["Engine"] --> dymes_common["Common"]
 ```
 
-
-The engine library (`dymes_engine`) binds the append and immutable stores together, exposing ingress and query functionality.
 
 - Message ingestion (append and/or import)
 - Queries
@@ -137,6 +156,8 @@ The engine library (`dymes_engine`) binds the append and immutable stores togeth
 ---
 ### HTTP library
 
+The HTTP library (`dymes_http`) provides an HTTP server with endpoints bound to health, ingress and query support.
+
 ```mermaid
 flowchart TD
     dymes_http["HTTP"] --> dymes_engine["Engine"]
@@ -144,10 +165,11 @@ flowchart TD
     dymes_http["HTTP"] --> dymes_common["Common"]
 ```
 
-The HTTP library (`dymes_http`) provides an HTTP server with endpoints bound to health, ingress and query support.
 
 ---
 ### Client library
+
+The client library (`dymes_client`) provides a minimal HTTP client for testing purposes.
 
 ```mermaid
 flowchart TD
@@ -155,7 +177,6 @@ flowchart TD
     dymes_client["Client"] --> dymes_common["Common"]
 ```
 
-The client library (`dymes_client`) provides a minimal HTTP client for testing purposes.
 
 Currently, the client library provides very few guardrails and no retry functionality, since the client will be
 replaced entirely once VSR support is complete.
@@ -163,15 +184,14 @@ replaced entirely once VSR support is complete.
 ---
 ### VSR library
 
+The VSR library (`dymes_vsr`) provides a no-frills implementation of [Viewstamped Replication (Revisited)](http://www.pmg.csail.mit.edu/vr/).
+
 ```mermaid
 flowchart TD
     dymes_vsr["VSR"] --> dymes_msg["Message"]
     dymes_vsr["VSR"] --> dymes_common["Common"]
 ```
 
-The VSR library (`dymes_vsr`) provides a no-frills implementation of [Viewstamped Replication (Revisited)](http://www.pmg.csail.mit.edu/vr/).
-
-> This is under active development and not yet complete (missing support for `GetState` and `NewState`)
 
 - VSR constants and limits
 - Structures for VSR operations, message, and state
@@ -179,8 +199,13 @@ The VSR library (`dymes_vsr`) provides a no-frills implementation of [Viewstampe
 - Non-blocking state machine
 - Minimal VSR client proxy
 
+> This is under active development and not yet complete (missing support for `GetState` and `NewState`)
+
+
 ---
 ## Dymes CLI Tooling
+
+Command line tooling for operations and development.
 
 ```mermaid
 block-beta
@@ -192,13 +217,14 @@ block-beta
     dymes_stress["Stress Tool"]
 ```
 
-Command line tooling for operations and development.
 
 - Data export and import (with a bit of scripting, allows backup/restore)
 - Development and testing tools
 
 ---
 ### Data Exporter
+
+Exports query results to a `JSON` file containing import request `DTOs`.
 
 ```mermaid
 flowchart TD
@@ -207,10 +233,11 @@ flowchart TD
     dymes_dde["Data Exporter"] --> dymes_client["Client"]
 ```
 
-Exports query results to a `JSON` file containing import request `DTOs`.
 
 ---
 ### Data Importer
+
+Imports messages from a `JSON` file containing import request `DTOs`.
 
 ```mermaid
 flowchart TD
@@ -220,10 +247,10 @@ flowchart TD
 ```
 
 
-Imports messages from a `JSON` file containing import request `DTOs`.
-
 ---
 ### VSR Simulator
+
+Development tool used to set up and test VSR cluster scenarios and manual integration testing.
 
 ```mermaid
 flowchart TD
@@ -234,10 +261,11 @@ flowchart TD
 ```
 
 
-Development tool used to set up and test VSR cluster scenarios and manual integration testing.
 
 ---
 ### Workshop
+
+Development tool used for experimentation and manual integration testing of non-VSR components.
 
 ```mermaid
 flowchart TD
@@ -247,10 +275,11 @@ flowchart TD
     dymes_workshop["Workshop"] --> dymes_common["Common"]
 ```
 
-Development tool used for experimentation and manual integration testing of non-VSR components.  
 
 ---
 ### Stress Tool
+
+Testing tool used to generate load for manual testing.
 
 ```mermaid
 flowchart TD
@@ -259,10 +288,11 @@ flowchart TD
     dymes_stress["Stress Tool"] --> dymes_common["Common"]
 ```
 
-Testing tool used to generate load for manual testing.
 
 ---
 ## Dymes Service Daemons
+
+These daemons provide the Dymes executable runtime environment.
 
 ```mermaid
 block-beta
@@ -271,10 +301,11 @@ block-beta
     dymes_dme["Metrics Exporter"]
 ```
 
-These daemons provide the Dymes executable runtime environment.
 
 ---
 ### Node
+
+Functions as a node in a Dymes cluster.
 
 ```mermaid
 flowchart TD
@@ -283,8 +314,6 @@ flowchart TD
     dymes_node["Node"] --> dymes_msg["Message"]
     dymes_node["Node"] --> dymes_common["Common"]
 ```
-
-Functions as a node in a Dymes cluster.
 
 ---
 ### Metrics Exporter
@@ -297,3 +326,4 @@ flowchart TD
 Exports metrics to a [Prometheus](https://prometheus.io) (or [compatible](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/prometheusreceiver)) collector.
 
 > This daemon is launched as a child of a [Node](#node) process.
+> 

@@ -8,6 +8,14 @@ SPDX-License-Identifier: Apache-2.0
 
 This document describes the main HTTP interactions between a Dymes client and server node.
 
+<!-- TOC -->
+* [Dymes HTTP Interaction](#dymes-http-interaction)
+* [Message creation](#message-creation)
+  * [Append message](#append-message)
+* [Message retrieval](#message-retrieval)
+  * [Query message](#query-message)
+  * [Cursor queries](#cursor-queries)
+<!-- TOC -->
 
 # Message creation
 
