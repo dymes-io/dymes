@@ -40,10 +40,6 @@ zig build stress
 
 See [Hacking](./HACKING.md) for information on developing Dymes, bearing in mind the [Dymes Conventions](CONVENTIONS.md).
 
-## Important concepts for usage
-
-See [Dymes Usage Concepts](doc/dymes-msg-concepts.md)
-
 ## Roadmap
 
 > Under construction
