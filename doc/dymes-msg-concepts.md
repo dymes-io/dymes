@@ -4,17 +4,18 @@ SPDX-FileCopyrightText: Copyright © 2025 The Dymes project authors
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Dymes Usage Concepts
+# Dymes Message Concepts
 
 <!-- TOC -->
-* [Dymes Usage Concepts](#dymes-usage-concepts)
+* [Dymes Message Concepts](#dymes-message-concepts)
   * [Correlation Identifier](#correlation-identifier)
   * [Routing value and routing mask](#routing-value-and-routing-mask)
     * [Widening (traditional) route masking](#widening-traditional-route-masking)
       * [Example of widening route masking](#example-of-widening-route-masking)
     * [Narrowing (constrictive) route masking](#narrowing-constrictive-route-masking)
       * [Example of narrowing route masking](#example-of-narrowing-route-masking)
-      * [Flexible narrowing (constrictive) route masking](#flexible-narrowing-constrictive-route-masking)
+    * [Flexible narrowing (constrictive) route masking](#flexible-narrowing-constrictive-route-masking)
+      * [Example of flexible narrowing (constrictive) route masking](#example-of-flexible-narrowing-constrictive-route-masking)
 <!-- TOC -->
 
 ---
@@ -181,7 +182,7 @@ Sadly, _with_ constrictive masking, we now cannot filter for the following cases
 | `0001100`    | Inbound or Outbound | No matches |
 
 
-#### Flexible narrowing (constrictive) route masking
+### Flexible narrowing (constrictive) route masking
 
 We can override the default narrowing `routing comparison` value to handle compound masks.
 

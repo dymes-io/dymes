@@ -6,6 +6,22 @@ SPDX-License-Identifier: Apache-2.0
 
 # Third-party dependencies
 
+Dymes has a few dependencies on third-party libraries, which are all
+open source under OSI-approved licenses.
+
+```mermaid
+mindmap
+Dependencies
+    hissylogz["hissylogz (v0.2.3)"]
+    zeit["zeit (v0.7.0)"]
+    zig-clap["zig-clap (v0.11.0)"]
+    zig-yaml["zig-yaml (zig-0.15.0-support)"]
+    httpzig["http.zig (master)"]
+    zimq["zimq (zig-0.15.2)"]
+```
+
+
+
 ## [hissylogz](https://github.com/hissyfit-dev/hissylogz) v0.2.3
 
 Low-ceremony, thread-safe structured logging for Zig.

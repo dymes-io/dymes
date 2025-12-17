@@ -4,7 +4,7 @@ SPDX-FileCopyrightText: Copyright © 2025 The Dymes project authors
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# dymes
+# Dymes
 
 Distributed Yet Minimal Event Sourcing
 
@@ -20,53 +20,29 @@ All this without having to set up and configure various supporting services.
 Deploy via Helm chart into a Kubernetes cluster using minimal configuration, or using Podman/Docker compose for
 local development.
 
-## Quickstart
+## Quickstart (Building and running a Dymes node)
+
+Install the required [developer tooling](./doc/dev-tooling.md), then:
+
+## Build and run a Dymes node locally
 
 ```sh
-make oci
-podman run --rm -p 6510:6510 -it dymes:latest
+zig build run
+```
+
+## Run the Dymes stress client
+
+```sh
+zig build stress
 ```
 
 ## Developing
 
 See [Hacking](./HACKING.md) for information on developing Dymes, bearing in mind the [Dymes Conventions](CONVENTIONS.md).
 
-## Using
-
-### Pre-requisites
-
-#### Podman/Docker
-
-##### macOS
-
-- Podman/Docker Desktop
-- Use `containerd`
-
-##### Linux
-
-- Podman or Docker Engine with `containerd`
-
-### Building and running
-
-#### Building the OCI image
-
-```sh
-make oci
-```
-
-#### Running the OCI image
-
-```sh
-podman run --rm -v ./zig-out/dymes-data:/var/dymes/data -p 6510:6510 -it dymes:latest
-```
-
-### Important concepts for usage
-
-See [Dymes Usage Concepts](./doc/dymes-usage-concepts.md)
-
 ## Roadmap
 
-> PLACEHOLDER
+> Under construction
 
 ## Dependencies
 
