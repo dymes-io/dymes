@@ -42,7 +42,42 @@ See [Hacking](./HACKING.md) for information on developing Dymes, bearing in mind
 
 ## Roadmap
 
-> Under construction
+### Standalone
+
+Working.
+
+- [x] Standalone Node
+- [x] Exporter (backup)
+- [x] Importer (restore)
+- [x] Append messages using HTTP
+- [x] Query messages using HTTP
+  - [x] Range queries 
+  - [x] Correlation queries
+  - [x] Channel queries
+- [x] Result cursor traversal 
+
+### Clustered
+
+In progress.
+
+- [ ] Clustered Node
+- [ ] Append messages using VSR
+  - [x] VSR Wire Protocol
+  - [x] VSR Transport (Zero MQ)
+  - [x] VSR Messages
+  - [x] VSR Operations
+  - [x] VSR Client Proxy (internal)
+  - [ ] VSR State Machine
+    - [x] VSR Request
+    - [x] VSR Prepare
+    - [x] VSR Prepare-OK
+    - [x] VSR Commit
+    - [x] VSR Start-View-Change
+    - [x] VSR Do-View-Change
+    - [x] VSR Start-View
+    - [ ] VSR Get-State
+    - [ ] VSR New-State
+  - [ ] HTTP redirect on view change
 
 ## Dependencies
 
