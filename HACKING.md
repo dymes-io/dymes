@@ -53,7 +53,9 @@ Dymes
         dymes_dme["Metrics Exporter"]
 ```
 
-Refer to [Dymes Components](./doc/dymes-components.md) for more detail on the libraries, tools and daemons comprising Dymes.
+For more detail on the libraries, tools and daemons comprising Dymes, refer to:
+- [Dymes Components](./doc/dymes-components.md)
+- [Dymes Component Flow](./doc/dymes-component-flow.md)
 
 ---
 ## Development Tooling
@@ -154,8 +156,8 @@ See [Dymes HTTP](./doc/dymes-http.md) for a description of interactions between 
 
 Essentially, Dymes stores messages, and allows such stored message to be queried.
 
-Regardless of the type of scenario Dymes is being used in (as a commit log, source of events, etc.) [there
-are concepts around the use](doc/dymes-msg-concepts.md) of *message identifiers*, *correlation identifiers* and *routing value* that need to be kept in mind.
+Regardless of the type of scenario Dymes is being used in (as a commit log, source of events, etc.) there
+are concepts around the use of *message identifiers*, *correlation identifiers* and *routing values* that need to be kept in mind.
 
 ---
 ### Correlation Identifier
