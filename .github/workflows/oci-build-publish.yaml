@@ -66,6 +66,11 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # "main" moves with every merge; "sha-<commit>" never moves, so consumers can pin an exact build.
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=short
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

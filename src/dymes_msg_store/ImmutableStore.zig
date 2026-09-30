@@ -109,6 +109,10 @@ pub fn open(gpa: std.mem.Allocator, frame_allocator: std.mem.Allocator, options:
     };
     errdefer gpa.destroy(new_self);
 
+    // The read dataset was handed the stack copy of the segment index above; point it at the store's own copy,
+    // which appends keep up to date, before the stack copy goes away.
+    new_self.read_dataset.segments_ulid_idx = &new_self.segments_ulid_idx;
+
     const health_provider = ComponentHealthProvider.init(component_name, new_self, healthProbe);
 
     try options.health.addProvider(health_provider);

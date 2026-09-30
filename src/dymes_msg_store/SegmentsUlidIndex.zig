@@ -129,6 +129,18 @@ pub fn mayContain(self: *const Self, id: Ulid) bool {
         isBeforeUlid(lower, id) and isBeforeUlid(id, upper);
 }
 
+/// Queries whether the inclusive range [start, end] overlaps the stored ids at all.
+///
+/// False for an empty store, and for a range wholly before the first or after the last message.
+/// Range queries clamp a bound outside the store to the store's first or last id, so without this
+/// check such a range would return everything.
+pub fn overlaps(self: *const Self, start: Ulid, end: Ulid) bool {
+    if (self.entries.items.len == 0) return false;
+    const lower = self.entries.items[0].first_id;
+    const upper = self.entries.items[self.entries.items.len - 1].last_id;
+    return !isBeforeUlid(end, lower) and !isBeforeUlid(upper, start);
+}
+
 /// Queries whether or not a message with a given ID may be imported.
 ///
 /// Messages with an ID after the current last entry are allowed.
@@ -197,8 +209,19 @@ test "SegmentsUlidIndex" {
     const ulid_end_seg_1 = try ulid_generator.next();
     const ulid_after = try ulid_generator.next();
 
+    // An empty index overlaps nothing
+    try testing.expect(!segment_index.overlaps(ulid_before, ulid_after));
+
     try segment_index.update(0, ulid_start_seg_0, ulid_end_seg_0);
     try segment_index.update(1, ulid_start_seg_1, ulid_end_seg_1);
+
+    // Overlap check: ranges wholly before or after the stored ids overlap nothing
+    try testing.expect(!segment_index.overlaps(ulid_before, ulid_before));
+    try testing.expect(!segment_index.overlaps(ulid_after, ulid_after));
+    try testing.expect(segment_index.overlaps(ulid_before, ulid_start_seg_0));
+    try testing.expect(segment_index.overlaps(ulid_end_seg_1, ulid_after));
+    try testing.expect(segment_index.overlaps(ulid_before, ulid_after));
+    try testing.expect(segment_index.overlaps(ulid_inside_seg_0, ulid_inside_seg_1));
 
     // Containment check
     try testing.expect(!segment_index.mayContain(ulid_before));

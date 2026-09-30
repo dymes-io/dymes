@@ -1181,20 +1181,8 @@ pub const ChannelIterator = struct {
                     //     .boolean("reached_end", self.reached_end)
                     //     .log();
                     self.channel_run_idx = null;
-                    if (self.reached_first) {
-                        self.reached_end = true;
-                        // FIXME - remove dev tracing
-                        // self.logger.fine()
-                        //     .msg("Reached end with no channel matches in current segment after reaching first in prior")
-                        //     .intx("channel_id", self.channel_id)
-                        //     .int("current_segment", self.current_segment)
-                        //     .int("first_segment", self.first_segment)
-                        //     .int("final_segment", self.final_segment)
-                        //     .ulid("first_ulid", self.first_ulid)
-                        //     .ulid("final_ulid", self.final_ulid)
-                        //     .boolean("reached_end", self.reached_end)
-                        //     .log();
-                    }
+                    // A segment without this channel is not the end: later segments may hold more of it. The
+                    // loop ends after final_segment, and final_ulid bounds what is returned.
                     continue;
                 }
             }

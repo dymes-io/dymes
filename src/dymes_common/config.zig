@@ -348,15 +348,20 @@ pub const Config = struct {
                     }
                 }
                 logger.debug("Replacing existing non-configuration entry [{s}]", .{base_name});
-                switch (existing) {
-                    .string_value => |str| self.allocator.free(str),
-                    .string_list_value => |lst| {
-                        for (lst.items) |lst_entry| {
-                            self.allocator.free(lst_entry);
-                        }
-                        lst.deinit();
-                    },
-                    else => {},
+                // Remove the old entry, releasing its key as well as its value: put() below would keep the old
+                // key and leak the one duplicated above.
+                if (self.config_map.fetchOrderedRemove(base_name)) |old| {
+                    self.allocator.free(old.key);
+                    switch (old.value) {
+                        .string_value => |str| self.allocator.free(str),
+                        .string_list_value => |lst| {
+                            for (lst.items) |lst_entry| {
+                                self.allocator.free(lst_entry);
+                            }
+                            lst.deinit();
+                        },
+                        else => {},
+                    }
                 }
             }
 
@@ -809,6 +814,21 @@ const EnvironmentConfigBuilder = struct {
         return target;
     }
 };
+
+test "a value replaced by a sub-config releases the old entry" {
+    // Environment variables such as JAVA_HOME and JAVA_HOME_17_X64 map to "java.home" and then
+    // "java.home.17.x64": the plain value becomes a sub-config. The old key and value must be released.
+    std.debug.print("test.config.value.replaced.by.subconfig\n", .{});
+    const allocator = testing.allocator;
+
+    var config_bld = try ConfigBuilder.init("replace", allocator);
+    try config_bld.withString("java.home", "/usr/lib/jvm/default");
+    try config_bld.withString("java.home.17.x64", "/usr/lib/jvm/17");
+    var config = try config_bld.build();
+    defer config.deinit();
+
+    try testing.expectEqualStrings("/usr/lib/jvm/17", (try config.asString("java.home.17.x64")).?);
+}
 
 test "config from environment" {
     var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
