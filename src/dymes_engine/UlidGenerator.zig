@@ -42,14 +42,18 @@ supplyPRN: std.Random = std.crypto.random,
 last: Ulid = .{ .time = 0, .rand = 0 },
 
 pub fn next(self: *Self) GeneratorError!Ulid {
-    const ms = self.supplyMilliTimestamp();
     self.mtx_ulids.lock();
     defer self.mtx_ulids.unlock();
+    // Read the clock under the lock, so ids are issued in the order their times were read.
+    const ms = self.supplyMilliTimestamp();
     if (ms < 0) return GeneratorError.TimeTooOld;
     if (ms > std.math.maxInt(u48)) return GeneratorError.TimeOverflow;
     const ms48: u48 = @intCast(ms);
 
-    if (ms48 == self.last.time) {
+    // Same millisecond, or the wall clock stepped back (NTP, a VM resync): stay monotonic by continuing
+    // from the last id. Adopting the older time would issue an id that sorts before ones already stored,
+    // and the engine rejects it (OutOfOrderCreation) until the clock catches up.
+    if (ms48 <= self.last.time) {
         if (self.last.rand == std.math.maxInt(u80)) return GeneratorError.RandomOverflow;
         self.last.rand += 1;
     } else {
@@ -61,6 +65,31 @@ pub fn next(self: *Self) GeneratorError!Ulid {
 }
 
 const UlidGenerator = @This();
+
+var test_clock_ms: i64 = 0;
+fn testClock() i64 {
+    return test_clock_ms;
+}
+
+test "UlidGenerator stays monotonic when the clock steps back" {
+    var gen: UlidGenerator = .{ .supplyMilliTimestamp = testClock };
+
+    test_clock_ms = 1_000_000;
+    const a = try gen.next();
+    test_clock_ms = 999_990; // the wall clock steps back 10 ms
+    const b = try gen.next();
+    test_clock_ms = 1_000_005; // and forward again
+    const c = try gen.next();
+
+    try std.testing.expect(isBefore(a, b));
+    try std.testing.expect(isBefore(b, c));
+    try std.testing.expectEqual(a.time, b.time);
+    try std.testing.expectEqual(@as(u48, 1_000_005), c.time);
+}
+
+fn isBefore(l: Ulid, r: Ulid) bool {
+    return l.time < r.time or (l.time == r.time and l.rand < r.rand);
+}
 
 test "UlidGenerator" {
     var ulid_supplier: UlidGenerator = .{};

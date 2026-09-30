@@ -138,8 +138,13 @@ pub fn overlaps(self: *const Self, start: Ulid, end: Ulid) bool {
     if (self.entries.items.len == 0) return false;
     const lower = self.entries.items[0].first_id;
     const upper = self.entries.items[self.entries.items.len - 1].last_id;
+    // A new store opens with segment 0 recorded as {nil, nil}: no message can have the nil id.
+    if (upper.equals(nil_ulid)) return false;
     return !isBeforeUlid(end, lower) and !isBeforeUlid(upper, start);
 }
+
+/// The id an index entry records while its segment holds no messages.
+const nil_ulid: Ulid = .{ .time = 0, .rand = 0 };
 
 /// Queries whether or not a message with a given ID may be imported.
 ///
@@ -211,6 +216,14 @@ test "SegmentsUlidIndex" {
 
     // An empty index overlaps nothing
     try testing.expect(!segment_index.overlaps(ulid_before, ulid_after));
+
+    // Nor does a new store's segment 0, recorded as {nil, nil} until its first message
+    {
+        var new_store_index = try init(gpa, 10);
+        defer new_store_index.deinit(gpa);
+        try new_store_index.update(0, nil_ulid, nil_ulid);
+        try testing.expect(!new_store_index.overlaps(.{ .time = 0, .rand = 0 }, ulid_after));
+    }
 
     try segment_index.update(0, ulid_start_seg_0, ulid_end_seg_0);
     try segment_index.update(1, ulid_start_seg_1, ulid_end_seg_1);
