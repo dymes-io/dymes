@@ -295,7 +295,13 @@ pub fn verifySegmentMessageFile(
     defer frame_allocator.free(read_buffer);
 
     // Check message file header
-    var msg_reader = msg_file.reader(read_buffer);
+    // The reader needs a buffer of its own: every read below lands in read_buffer, and a reader backed by that
+    // same buffer overwrote the bytes it was reading (the header magic never matched, so no store could reopen;
+    // the last-message check tripped "@memcpy arguments alias").
+    const reader_buffer: []u8 = frame_allocator.alloc(u8, 4096) catch return SegmentConsistencyFailure.ResourcesExhausted;
+    defer frame_allocator.free(reader_buffer);
+
+    var msg_reader = msg_file.reader(reader_buffer);
     var msg_reader_itf = &msg_reader.interface;
 
     msg_reader.seekTo(0) catch |e| {
