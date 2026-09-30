@@ -29,7 +29,7 @@
             .hash = "httpz-0.0.0-PNVzrFm5BgBSwbIfjg-nFNI1HAJzzPVFHYInimLC8CfY",
         },
         .zimq = .{
-            .url = "https://github.com/uyha/zimq/archive/refs/tags/zig-0.15.2.tar.gz",
+            .url = "https://github.com/uyha/zimq/archive/969d916e980472a5e7bd01d92fbea1af62256559.tar.gz",
             .hash = "zimq-0.0.0-nw1ioFWoAQAfxoLYHAE-ImuPI4shK3S2OSPOWNyJOoN_",
         },
     },
