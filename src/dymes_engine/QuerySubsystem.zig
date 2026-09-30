@@ -213,6 +213,9 @@ pub fn execute(self: *Self, request: QueryRequest) QueryExecutionError!*QueryCur
                 .any("query", request.query)
                 .any("filters", request.filters)
                 .log();
+            if (!self.immutable_store.segments_ulid_idx.overlaps(start_end.range_start, start_end.range_end)) {
+                break :cursor_lazy_range try QueryCursor.open(self.allocator, .{ .empty_result = &empty_result });
+            }
             const results = try self.range_results_bld.buildRanged(request.filters, start_end.range_start, start_end.range_end);
             execution_time_ns = execution_timer.lap();
             defer results_build_time_ns = execution_timer.lap();
@@ -225,6 +228,11 @@ pub fn execute(self: *Self, request: QueryRequest) QueryExecutionError!*QueryCur
                 .any("query", request.query)
                 .any("filters", request.filters)
                 .log();
+            // An empty store, or a range wholly outside it, has nothing to return (the builders assume at least
+            // one segment and clamp out-of-store bounds to the store's first or last id).
+            if (!self.immutable_store.segments_ulid_idx.overlaps(channel_start_end.range_start, channel_start_end.range_end)) {
+                break :cursor_lazy_range try QueryCursor.open(self.allocator, .{ .empty_result = &empty_result });
+            }
             const results = try self.channel_results_bld.buildChannel(channel_start_end.channel_id, request.filters, channel_start_end.range_start, channel_start_end.range_end);
             execution_time_ns = execution_timer.lap();
             defer results_build_time_ns = execution_timer.lap();
