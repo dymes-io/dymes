@@ -395,15 +395,17 @@ pub fn acquireSegment(self: *Self, segment_no: u64) ActiveSegmentError!DataSegme
         .segment_no = segment_no,
         .timestamp = 0x0,
     });
-    errdefer data_segment_ptr.close();
+    // Until the cache holds the segment, a failure closes what was opened here; once it does, the cache owns them.
+    var cached = false;
+    errdefer if (!cached) data_segment_ptr.close();
 
     // Prepare message index
     const msg_index_ptr = try MessageIndex.init(self.gpa);
-    errdefer msg_index_ptr.deinit();
+    errdefer if (!cached) msg_index_ptr.deinit();
 
     // Prepare channel index
     const channel_index_ptr = try ChannelIndex.init(self.gpa);
-    errdefer channel_index_ptr.deinit();
+    errdefer if (!cached) channel_index_ptr.deinit();
 
     // Update cache entry
     const dse: DataSegmentsCache.DataSegmentEntry = dse_val: {
@@ -415,9 +417,12 @@ pub fn acquireSegment(self: *Self, segment_no: u64) ActiveSegmentError!DataSegme
             DataSegmentsCache.PutError.OutOfMemory => ActiveSegmentError.OutOfMemory,
             else => ActiveSegmentError.OtherCreationFailure,
         };
+        cached = true;
         break :dse_val self.segments_cache.acquire(segment_no) orelse return ActiveSegmentError.AccessFailure;
     };
-    errdefer self.releaseSegment(dse);
+    // A failure from here takes the entry out of the cache, its resources with it. Closing them while the entry stayed
+    // left a closed segment in the cache, and the next eviction read it: the node crashed (extractDseKey).
+    errdefer self.segments_cache.discard(segment_no);
 
     // Populate indexes
 
@@ -446,18 +451,19 @@ pub fn acquireSegment(self: *Self, segment_no: u64) ActiveSegmentError!DataSegme
                 };
             }
 
-            // Lookup in earlier segments
+            // In an earlier segment: the index keeps which one. Where it is in that segment is found when a
+            // correlation query needs it (CorrelationResults.Iterator.next looks it up from the message's correlation
+            // id), so loading this segment never loads another. Looking it up here loaded the earlier segment, whose
+            // own first messages correlated to the one before it, and so on, holding every segment of the chain: a
+            // read starting deep into a store whose batches straddle segment boundaries needed more than the 64
+            // segments the cache holds, failed, and the node crashed.
             if (self.segments_ulid_idx.lookup(corr_id)) |_corr_segment_no| {
-                self.logger.debug()
-                    .msg("Lookup in earlier segments")
-                    .int("segment_no", segment_no)
-                    .ulid("corr_id", corr_id)
-                    .int("corr_segment_no", _corr_segment_no)
-                    .log();
-
-                if (try self.lookupLocation(_corr_segment_no, corr_id)) |_corr_loc| {
-                    break :loc_val _corr_loc;
-                }
+                break :loc_val .{
+                    .id = corr_id,
+                    .file_offset = 0,
+                    .frame_size = 0,
+                    .segment_no = _corr_segment_no,
+                };
             }
 
             // Invalid correlation id
