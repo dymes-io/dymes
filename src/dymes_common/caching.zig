@@ -168,6 +168,27 @@ pub fn ManagedLruCache(comptime K: type, comptime V: type) type {
             }
         }
 
+        /// Removes the entry for `k` whatever its references, releasing its resources: for a value that failed to
+        /// become usable after it was put, so it never stays in the cache half-made.
+        pub fn discard(self: *Self, k: K) void {
+            self.mtx_dataset.lock();
+            defer self.mtx_dataset.unlock();
+
+            if (self.node_map.fetchRemove(k)) |_kv| {
+                const rcv_node = _kv.value;
+                defer self.gpa.destroy(rcv_node);
+                self.node_list.remove(&rcv_node.node);
+                var v = rcv_node.val;
+                self.releaseResources(&v) catch |e| {
+                    self.logger.warn()
+                        .msg("Failed to release discarded cache resources")
+                        .any("key", k)
+                        .err(e)
+                        .log();
+                };
+            }
+        }
+
         fn evictLRU(self: *Self) bool {
             self.mtx_dataset.lock();
             defer self.mtx_dataset.unlock();

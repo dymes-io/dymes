@@ -101,6 +101,11 @@ pub fn release(self: *Self, dse: DataSegmentEntry) void {
     return self.dse_cache.release(dse.data_segment.segment_no);
 }
 
+/// Takes a segment out of the cache whatever its references, releasing its resources (a segment that failed to load).
+pub fn discard(self: *Self, segment_no: u64) void {
+    self.dse_cache.discard(segment_no);
+}
+
 fn extractDseKey(dse: *const DataSegmentEntry) u64 {
     return dse.data_segment.segment_no;
 }
