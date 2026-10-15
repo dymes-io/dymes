@@ -314,7 +314,9 @@ pub fn handleTraverseCursor(self: *Self, request: *httpz.Request, response: *htt
         return;
     };
 
-    if (self.shared_ctx.cursor(cursor_id)) |query_cursor| {
+    // Held for the whole traversal: a close meanwhile (a client whose read timed out) waits for it to finish (#7).
+    if (self.shared_ctx.borrowCursor(cursor_id)) |query_cursor| {
+        defer self.shared_ctx.returnCursor(cursor_id);
         const kv_query = request.query() catch |e| {
             self.respondWithError("Parsing query arguments", e, response);
             return;
