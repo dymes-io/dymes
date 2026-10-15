@@ -59,6 +59,12 @@ stopping_flag: bool = false,
 query_cursors: std.AutoHashMap(u64, *QueryCursor),
 /// Active cursor map lock
 query_cursors_mtx: std.Thread.Mutex = .{},
+/// Requests traversing each cursor now (borrowCursor/returnCursor). A cursor closed while in use is only marked
+/// (cursors_closing) and closed by its last user: closing it at once freed it under the traversal, and the node
+/// crashed (#7: a client whose read timed out closed its cursor while the traversal went on).
+cursor_users: std.AutoHashMap(u64, u32),
+/// Cursors closed while in use, closed by their last user.
+cursors_closing: std.AutoHashMap(u64, void),
 
 pub fn init(allocator: Allocator, metrics: *HttpMetrics, health: *Health, engine: *Engine, ingester: *Ingester, options: Options) CreationError!*Self {
     const logger = common.logging.logger(component_name);
@@ -67,6 +73,10 @@ pub fn init(allocator: Allocator, metrics: *HttpMetrics, health: *Health, engine
 
     var query_cursors = std.AutoHashMap(u64, *QueryCursor).init(allocator);
     errdefer query_cursors.deinit();
+    var cursor_users = std.AutoHashMap(u64, u32).init(allocator);
+    errdefer cursor_users.deinit();
+    var cursors_closing = std.AutoHashMap(u64, void).init(allocator);
+    errdefer cursors_closing.deinit();
 
     var prng_fast = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
@@ -88,6 +98,8 @@ pub fn init(allocator: Allocator, metrics: *HttpMetrics, health: *Health, engine
         .engine = engine,
         .ingester = ingester,
         .query_cursors = query_cursors,
+        .cursor_users = cursor_users,
+        .cursors_closing = cursors_closing,
         .nanoTimestamp = options.ns_ts_supplier,
         .prng = prng_fast.random(),
     };
@@ -100,6 +112,8 @@ pub fn deinit(self: *Self) void {
         self.query_cursors_mtx.lock();
         defer self.query_cursors_mtx.unlock();
         defer self.query_cursors.deinit();
+        defer self.cursor_users.deinit();
+        defer self.cursors_closing.deinit();
         var it = self.query_cursors.iterator();
         while (it.next()) |_query_cursor| {
             self.logger.warn()
@@ -160,6 +174,23 @@ pub fn releaseCursor(self: *Self, cursor_id: u64) void {
     self.query_cursors_mtx.lock();
     defer self.query_cursors_mtx.unlock();
 
+    if (self.cursor_users.get(cursor_id)) |_users| {
+        if (_users > 0) {
+            // In use: its last user closes it (returnCursor).
+            self.cursors_closing.put(cursor_id, {}) catch {};
+            self.logger.fine()
+                .msg("Query cursor closed while in use; its last user releases it")
+                .intx("cursor_id", cursor_id)
+                .log();
+            return;
+        }
+    }
+    self.closeCursorLocked(cursor_id);
+}
+
+/// Removes and closes the cursor; the caller holds query_cursors_mtx.
+fn closeCursorLocked(self: *Self, cursor_id: u64) void {
+    _ = self.cursors_closing.remove(cursor_id);
     if (self.query_cursors.fetchRemove(cursor_id)) |_entry| {
         _entry.value.close();
         self.logger.fine()
@@ -180,4 +211,35 @@ pub fn cursor(self: *Self, cursor_id: u64) ?*QueryCursor {
     defer self.query_cursors_mtx.unlock();
 
     return self.query_cursors.get(cursor_id);
+}
+
+/// The cursor, held for a traversal until returnCursor: a close meanwhile only marks it. Null when it is unknown or
+/// already being closed.
+pub fn borrowCursor(self: *Self, cursor_id: u64) ?*QueryCursor {
+    self.query_cursors_mtx.lock();
+    defer self.query_cursors_mtx.unlock();
+
+    if (self.cursors_closing.contains(cursor_id)) {
+        return null;
+    }
+    const query_cursor = self.query_cursors.get(cursor_id) orelse return null;
+    const users = self.cursor_users.getOrPut(cursor_id) catch return null;
+    users.value_ptr.* = if (users.found_existing) users.value_ptr.* + 1 else 1;
+    return query_cursor;
+}
+
+/// Ends a traversal's hold on the cursor; the last user of a cursor closed meanwhile closes it.
+pub fn returnCursor(self: *Self, cursor_id: u64) void {
+    self.query_cursors_mtx.lock();
+    defer self.query_cursors_mtx.unlock();
+
+    if (self.cursor_users.getPtr(cursor_id)) |_users| {
+        _users.* -= 1;
+        if (_users.* == 0) {
+            _ = self.cursor_users.remove(cursor_id);
+            if (self.cursors_closing.contains(cursor_id)) {
+                self.closeCursorLocked(cursor_id);
+            }
+        }
+    }
 }

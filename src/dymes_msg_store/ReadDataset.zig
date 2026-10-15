@@ -810,19 +810,11 @@ pub const RangeIterator = struct {
     }
 
     pub fn next(self: *RangeIterator) IteratorError!?Message {
-        // self.logger.fine()
-        //     .msg("Start of next range iteration")
-        //     .int("current_segment", self.current_segment)
-        //     .int("first_segment", self.first_segment)
-        //     .int("final_segment", self.final_segment)
-        //     .ulid("first_ulid", self.first_ulid)
-        //     .ulid("final_ulid", self.final_ulid)
-        //     .boolean("reached_end", self.reached_end)
-        //     .log();
-
-        if (self.reached_end) {
+        // A loop, not a recursive call per segment: a read across many segments overflowed a worker
+        // thread's stack (#7).
+        while (true) {
             // self.logger.fine()
-            //     .msg("Short-circuiting next()")
+            //     .msg("Start of next range iteration")
             //     .int("current_segment", self.current_segment)
             //     .int("first_segment", self.first_segment)
             //     .int("final_segment", self.final_segment)
@@ -831,17 +823,9 @@ pub const RangeIterator = struct {
             //     .boolean("reached_end", self.reached_end)
             //     .log();
 
-            // Short-circuit
-            return null;
-        }
-
-        // Fetch next from current segment's message file
-        if (self.msg_file_it_) |*msg_file_it| {
-            const fetched = try msg_file_it.next();
-            if (fetched) |val| {
+            if (self.reached_end) {
                 // self.logger.fine()
-                //     .msg("Found message")
-                //     .ulid("message_id", val.frame_header.id)
+                //     .msg("Short-circuiting next()")
                 //     .int("current_segment", self.current_segment)
                 //     .int("first_segment", self.first_segment)
                 //     .int("final_segment", self.final_segment)
@@ -849,10 +833,17 @@ pub const RangeIterator = struct {
                 //     .ulid("final_ulid", self.final_ulid)
                 //     .boolean("reached_end", self.reached_end)
                 //     .log();
-                if (@as(u128, @bitCast(val.frame_header.id)) == @as(u128, @bitCast(self.final_ulid))) {
-                    self.reached_end = true; // Actually found final desired message
+
+                // Short-circuit
+                return null;
+            }
+
+            // Fetch next from current segment's message file
+            if (self.msg_file_it_) |*msg_file_it| {
+                const fetched = try msg_file_it.next();
+                if (fetched) |val| {
                     // self.logger.fine()
-                    //     .msg("Reached final message")
+                    //     .msg("Found message")
                     //     .ulid("message_id", val.frame_header.id)
                     //     .int("current_segment", self.current_segment)
                     //     .int("first_segment", self.first_segment)
@@ -861,11 +852,38 @@ pub const RangeIterator = struct {
                     //     .ulid("final_ulid", self.final_ulid)
                     //     .boolean("reached_end", self.reached_end)
                     //     .log();
-                } else if (isBeforeUlid(self.final_ulid, val.frame_header.id)) {
-                    self.reached_end = true; // We overshot the final desired message
+                    if (@as(u128, @bitCast(val.frame_header.id)) == @as(u128, @bitCast(self.final_ulid))) {
+                        self.reached_end = true; // Actually found final desired message
+                        // self.logger.fine()
+                        //     .msg("Reached final message")
+                        //     .ulid("message_id", val.frame_header.id)
+                        //     .int("current_segment", self.current_segment)
+                        //     .int("first_segment", self.first_segment)
+                        //     .int("final_segment", self.final_segment)
+                        //     .ulid("first_ulid", self.first_ulid)
+                        //     .ulid("final_ulid", self.final_ulid)
+                        //     .boolean("reached_end", self.reached_end)
+                        //     .log();
+                    } else if (isBeforeUlid(self.final_ulid, val.frame_header.id)) {
+                        self.reached_end = true; // We overshot the final desired message
+                        // self.logger.fine()
+                        //     .msg("Overshot final message")
+                        //     .ulid("message_id", val.frame_header.id)
+                        //     .int("current_segment", self.current_segment)
+                        //     .int("first_segment", self.first_segment)
+                        //     .int("final_segment", self.final_segment)
+                        //     .ulid("first_ulid", self.first_ulid)
+                        //     .ulid("final_ulid", self.final_ulid)
+                        //     .boolean("reached_end", self.reached_end)
+                        //     .log();
+                        return null;
+                    }
+                    return val;
+                }
+                if (self.current_segment == self.final_segment) {
+                    self.reached_end = true; // Ran out of messages before reaching final message
                     // self.logger.fine()
-                    //     .msg("Overshot final message")
-                    //     .ulid("message_id", val.frame_header.id)
+                    //     .msg("Ran out of messages before reaching final message")
                     //     .int("current_segment", self.current_segment)
                     //     .int("first_segment", self.first_segment)
                     //     .int("final_segment", self.final_segment)
@@ -874,66 +892,52 @@ pub const RangeIterator = struct {
                     //     .boolean("reached_end", self.reached_end)
                     //     .log();
                     return null;
-                }
-                return val;
-            }
-            if (self.current_segment == self.final_segment) {
-                self.reached_end = true; // Ran out of messages before reaching final message
-                // self.logger.fine()
-                //     .msg("Ran out of messages before reaching final message")
-                //     .int("current_segment", self.current_segment)
-                //     .int("first_segment", self.first_segment)
-                //     .int("final_segment", self.final_segment)
-                //     .ulid("first_ulid", self.first_ulid)
-                //     .ulid("final_ulid", self.final_ulid)
-                //     .boolean("reached_end", self.reached_end)
-                //     .log();
-                return null;
-            } else {
-                // self.logger.fine()
-                //     .msg("Ran out of messages in current segment")
-                //     .int("current_segment", self.current_segment)
-                //     .int("first_segment", self.first_segment)
-                //     .int("final_segment", self.final_segment)
-                //     .ulid("first_ulid", self.first_ulid)
-                //     .ulid("final_ulid", self.final_ulid)
-                //     .boolean("reached_end", self.reached_end)
-                //     .log();
+                } else {
+                    // self.logger.fine()
+                    //     .msg("Ran out of messages in current segment")
+                    //     .int("current_segment", self.current_segment)
+                    //     .int("first_segment", self.first_segment)
+                    //     .int("final_segment", self.final_segment)
+                    //     .ulid("first_ulid", self.first_ulid)
+                    //     .ulid("final_ulid", self.final_ulid)
+                    //     .boolean("reached_end", self.reached_end)
+                    //     .log();
 
-                // We've run out messages in the current segment, more remains
+                    // We've run out messages in the current segment, more remains
+                    msg_file_it.close();
+                    self.msg_file_it_ = null;
+                    self.current_segment += 1;
+                }
+            }
+
+            // No current segment, or non-final segment fully traversed
+            const dse = try self.read_dataset.acquireSegment(self.current_segment);
+            defer self.read_dataset.releaseSegment(dse);
+
+            const iterator_offset: u64 = if (self.current_segment == self.first_segment) offset: {
+                break :offset if (dse.message_index.lookupClosest(self.first_ulid)) |mie| mie.msg_file_offset else @sizeOf(MessageFile.Header);
+            } else @sizeOf(MessageFile.Header);
+
+            // self.logger.fine()
+            //     .msg("Opening segment message file iterator")
+            //     .int("iterator_offset", iterator_offset)
+            //     .int("current_segment", self.current_segment)
+            //     .int("first_segment", self.first_segment)
+            //     .int("final_segment", self.final_segment)
+            //     .ulid("first_ulid", self.first_ulid)
+            //     .ulid("final_ulid", self.final_ulid)
+            //     .boolean("reached_end", self.reached_end)
+            //     .log();
+
+            if (self.msg_file_it_) |*msg_file_it| {
                 msg_file_it.close();
                 self.msg_file_it_ = null;
-                self.current_segment += 1;
             }
+
+            self.msg_file_it_ = try dse.data_segment.message_file.offsetIterator(iterator_offset);
+            errdefer self.msg_file_it_.?.close();
+            continue; // Now attempt fetch again
         }
-
-        // No current segment, or non-final segment fully traversed
-        const dse = try self.read_dataset.acquireSegment(self.current_segment);
-        defer self.read_dataset.releaseSegment(dse);
-
-        const iterator_offset: u64 = if (self.current_segment == self.first_segment) offset: {
-            break :offset if (dse.message_index.lookupClosest(self.first_ulid)) |mie| mie.msg_file_offset else @sizeOf(MessageFile.Header);
-        } else @sizeOf(MessageFile.Header);
-
-        // self.logger.fine()
-        //     .msg("Opening segment message file iterator")
-        //     .int("iterator_offset", iterator_offset)
-        //     .int("current_segment", self.current_segment)
-        //     .int("first_segment", self.first_segment)
-        //     .int("final_segment", self.final_segment)
-        //     .ulid("first_ulid", self.first_ulid)
-        //     .ulid("final_ulid", self.final_ulid)
-        //     .boolean("reached_end", self.reached_end)
-        //     .log();
-
-        if (self.msg_file_it_) |*msg_file_it| {
-            msg_file_it.close();
-            self.msg_file_it_ = null;
-        }
-
-        self.msg_file_it_ = try dse.data_segment.message_file.offsetIterator(iterator_offset);
-        errdefer self.msg_file_it_.?.close();
-        return self.next(); // Now attempt fetch again
     }
 
     pub fn rewind(self: *RangeIterator) void {
@@ -1133,22 +1137,12 @@ pub const ChannelIterator = struct {
     }
 
     pub fn next(self: *ChannelIterator) IteratorError!?Message {
-        // FIXME - remove dev tracing
-        // self.logger.fine()
-        //     .msg("Start of next iteration")
-        //     .intx("channel_id", self.channel_id)
-        //     .int("current_segment", self.current_segment)
-        //     .int("first_segment", self.first_segment)
-        //     .int("final_segment", self.final_segment)
-        //     .ulid("first_ulid", self.first_ulid)
-        //     .ulid("final_ulid", self.final_ulid)
-        //     .boolean("reached_end", self.reached_end)
-        //     .log();
-
-        if (self.reached_end) {
+        // A loop, not a recursive call per segment: a read across many segments overflowed a worker
+        // thread's stack (#7).
+        while (true) {
             // FIXME - remove dev tracing
             // self.logger.fine()
-            //     .msg("Short-circuiting next()")
+            //     .msg("Start of next iteration")
             //     .intx("channel_id", self.channel_id)
             //     .int("current_segment", self.current_segment)
             //     .int("first_segment", self.first_segment)
@@ -1158,112 +1152,10 @@ pub const ChannelIterator = struct {
             //     .boolean("reached_end", self.reached_end)
             //     .log();
 
-            // Short-circuit
-            return null;
-        }
-
-        // Sets channel_run to first segment containing a channel run for channel_id, scanning current segment up to final segment for channel matches
-        const channel_run: []const ChannelIndex.ChannelRunEntry = run_val: {
-            for (self.current_segment..self.final_segment + 1) |active_segment| {
-                const dse = try self.read_dataset.acquireSegment(active_segment);
-                defer self.read_dataset.releaseSegment(dse);
-                if (dse.channel_index.lookup(self.channel_id)) |channel_run| {
-                    assert(channel_run.len != 0);
-                    if (self.channel_run_idx == null) {
-                        self.channel_run_idx = 0;
-                    }
-                    self.current_segment = active_segment;
-                    break :run_val channel_run;
-                } else {
-                    // FIXME - remove dev tracing
-                    // self.logger.fine()
-                    //     .msg("No channel matches in current segment")
-                    //     .intx("channel_id", self.channel_id)
-                    //     .int("current_segment", self.current_segment)
-                    //     .int("first_segment", self.first_segment)
-                    //     .int("final_segment", self.final_segment)
-                    //     .ulid("first_ulid", self.first_ulid)
-                    //     .ulid("final_ulid", self.final_ulid)
-                    //     .boolean("reached_end", self.reached_end)
-                    //     .log();
-                    self.channel_run_idx = null;
-                    // A segment without this channel is not the end: later segments may hold more of it. The
-                    // loop ends after final_segment, and final_ulid bounds what is returned.
-                    continue;
-                }
-            }
-            // FIXME - remove dev tracing
-            // self.logger.fine()
-            //     .msg("No segment has messages for channel")
-            //     .intx("channel_id", self.channel_id)
-            //     .int("current_segment", self.current_segment)
-            //     .int("first_segment", self.first_segment)
-            //     .int("final_segment", self.final_segment)
-            //     .ulid("first_ulid", self.first_ulid)
-            //     .ulid("final_ulid", self.final_ulid)
-            //     .boolean("reached_end", self.reached_end)
-            //     .log();
-
-            // No segment has messages for channel
-            self.channel_run_idx = null;
-            self.reached_end = true;
-            return null;
-        };
-
-        // Fetch next from current segment's channel run
-        if (self.channel_run_idx) |_channel_run_idx| {
-            if (_channel_run_idx < channel_run.len) {
-                if (self.reached_first) {
-                    const run_entry = channel_run[_channel_run_idx];
-                    const seg_loc: SegmentLocation = .{ .segment_no = self.current_segment, .file_offset = run_entry.file_offset, .frame_size = run_entry.frame_size };
-                    const msg = try self.read_dataset.fetchFromSegment(seg_loc, self.msg_buffer);
-                    if (msg) |_msg| {
-                        if (isSameOrBeforeUlid(_msg.id(), self.final_ulid)) {
-                            defer self.channel_run_idx = _channel_run_idx + 1;
-                            return _msg;
-                        }
-                        // Overshot final message
-                        self.channel_run_idx = null;
-                        self.reached_end = true;
-                        return null;
-                    } else {
-                        return IteratorError.EntryNotFound;
-                    }
-                } else {
-                    for (_channel_run_idx..channel_run.len) |_cridx| {
-                        const run_entry = channel_run[_cridx];
-                        const seg_loc: SegmentLocation = .{ .segment_no = self.current_segment, .file_offset = run_entry.file_offset, .frame_size = run_entry.frame_size };
-                        const msg = try self.read_dataset.fetchFromSegment(seg_loc, self.msg_buffer);
-                        if (msg) |_msg| {
-                            if (isSameOrAfterUlid(_msg.id(), self.first_ulid)) {
-                                self.reached_first = true;
-                                defer self.channel_run_idx = _cridx + 1;
-                                return _msg;
-                            }
-                        } else {
-                            return IteratorError.EntryNotFound;
-                        }
-                    }
-                    // FIXME - remove dev tracing
-                    // self.logger.fine()
-                    //     .msg("First not reached in current segment")
-                    //     .intx("channel_id", self.channel_id)
-                    //     .int("current_segment", self.current_segment)
-                    //     .int("first_segment", self.first_segment)
-                    //     .int("final_segment", self.final_segment)
-                    //     .ulid("first_ulid", self.first_ulid)
-                    //     .ulid("final_ulid", self.final_ulid)
-                    //     .boolean("reached_end", self.reached_end)
-                    //     .log();
-                    // Reached end of channel run in current segment before reaching first ULID
-                    self.channel_run_idx = null;
-                    self.current_segment += 1;
-                    return self.next();
-                }
-            } else if (self.current_segment == self.final_segment) {
+            if (self.reached_end) {
                 // FIXME - remove dev tracing
                 // self.logger.fine()
-                //     .msg("Reached end of channel run in final segment")
+                //     .msg("Short-circuiting next()")
                 //     .intx("channel_id", self.channel_id)
                 //     .int("current_segment", self.current_segment)
                 //     .int("first_segment", self.first_segment)
@@ -1272,39 +1164,155 @@ pub const ChannelIterator = struct {
                 //     .ulid("final_ulid", self.final_ulid)
                 //     .boolean("reached_end", self.reached_end)
                 //     .log();
-                // Reached end of channel run in final segment
+
+                // Short-circuit
+                return null;
+            }
+
+            // Sets channel_run to first segment containing a channel run for channel_id, scanning current segment up to final segment for channel matches
+            const channel_run: []const ChannelIndex.ChannelRunEntry = run_val: {
+                for (self.current_segment..self.final_segment + 1) |active_segment| {
+                    const dse = try self.read_dataset.acquireSegment(active_segment);
+                    defer self.read_dataset.releaseSegment(dse);
+                    if (dse.channel_index.lookup(self.channel_id)) |channel_run| {
+                        assert(channel_run.len != 0);
+                        if (self.channel_run_idx == null) {
+                            self.channel_run_idx = 0;
+                        }
+                        self.current_segment = active_segment;
+                        break :run_val channel_run;
+                    } else {
+                        // FIXME - remove dev tracing
+                        // self.logger.fine()
+                        //     .msg("No channel matches in current segment")
+                        //     .intx("channel_id", self.channel_id)
+                        //     .int("current_segment", self.current_segment)
+                        //     .int("first_segment", self.first_segment)
+                        //     .int("final_segment", self.final_segment)
+                        //     .ulid("first_ulid", self.first_ulid)
+                        //     .ulid("final_ulid", self.final_ulid)
+                        //     .boolean("reached_end", self.reached_end)
+                        //     .log();
+                        self.channel_run_idx = null;
+                        // A segment without this channel is not the end: later segments may hold more of it. The
+                        // loop ends after final_segment, and final_ulid bounds what is returned.
+                        continue;
+                    }
+                }
+                // FIXME - remove dev tracing
+                // self.logger.fine()
+                //     .msg("No segment has messages for channel")
+                //     .intx("channel_id", self.channel_id)
+                //     .int("current_segment", self.current_segment)
+                //     .int("first_segment", self.first_segment)
+                //     .int("final_segment", self.final_segment)
+                //     .ulid("first_ulid", self.first_ulid)
+                //     .ulid("final_ulid", self.final_ulid)
+                //     .boolean("reached_end", self.reached_end)
+                //     .log();
+
+                // No segment has messages for channel
                 self.channel_run_idx = null;
                 self.reached_end = true;
                 return null;
+            };
+
+            // Fetch next from current segment's channel run
+            if (self.channel_run_idx) |_channel_run_idx| {
+                if (_channel_run_idx < channel_run.len) {
+                    if (self.reached_first) {
+                        const run_entry = channel_run[_channel_run_idx];
+                        const seg_loc: SegmentLocation = .{ .segment_no = self.current_segment, .file_offset = run_entry.file_offset, .frame_size = run_entry.frame_size };
+                        const msg = try self.read_dataset.fetchFromSegment(seg_loc, self.msg_buffer);
+                        if (msg) |_msg| {
+                            if (isSameOrBeforeUlid(_msg.id(), self.final_ulid)) {
+                                defer self.channel_run_idx = _channel_run_idx + 1;
+                                return _msg;
+                            }
+                            // Overshot final message
+                            self.channel_run_idx = null;
+                            self.reached_end = true;
+                            return null;
+                        } else {
+                            return IteratorError.EntryNotFound;
+                        }
+                    } else {
+                        for (_channel_run_idx..channel_run.len) |_cridx| {
+                            const run_entry = channel_run[_cridx];
+                            const seg_loc: SegmentLocation = .{ .segment_no = self.current_segment, .file_offset = run_entry.file_offset, .frame_size = run_entry.frame_size };
+                            const msg = try self.read_dataset.fetchFromSegment(seg_loc, self.msg_buffer);
+                            if (msg) |_msg| {
+                                if (isSameOrAfterUlid(_msg.id(), self.first_ulid)) {
+                                    self.reached_first = true;
+                                    defer self.channel_run_idx = _cridx + 1;
+                                    return _msg;
+                                }
+                            } else {
+                                return IteratorError.EntryNotFound;
+                            }
+                        }
+                        // FIXME - remove dev tracing
+                        // self.logger.fine()
+                        //     .msg("First not reached in current segment")
+                        //     .intx("channel_id", self.channel_id)
+                        //     .int("current_segment", self.current_segment)
+                        //     .int("first_segment", self.first_segment)
+                        //     .int("final_segment", self.final_segment)
+                        //     .ulid("first_ulid", self.first_ulid)
+                        //     .ulid("final_ulid", self.final_ulid)
+                        //     .boolean("reached_end", self.reached_end)
+                        //     .log();
+                        // Reached end of channel run in current segment before reaching first ULID
+                        self.channel_run_idx = null;
+                        self.current_segment += 1;
+                        continue;
+                    }
+                } else if (self.current_segment == self.final_segment) {
+                    // FIXME - remove dev tracing
+                    // self.logger.fine()
+                    //     .msg("Reached end of channel run in final segment")
+                    //     .intx("channel_id", self.channel_id)
+                    //     .int("current_segment", self.current_segment)
+                    //     .int("first_segment", self.first_segment)
+                    //     .int("final_segment", self.final_segment)
+                    //     .ulid("first_ulid", self.first_ulid)
+                    //     .ulid("final_ulid", self.final_ulid)
+                    //     .boolean("reached_end", self.reached_end)
+                    //     .log();
+                    // Reached end of channel run in final segment
+                    self.channel_run_idx = null;
+                    self.reached_end = true;
+                    return null;
+                } else {
+                    // FIXME - remove dev tracing
+                    // self.logger.fine()
+                    //     .msg("Reached end of channel run in current segment")
+                    //     .intx("channel_id", self.channel_id)
+                    //     .int("current_segment", self.current_segment)
+                    //     .int("first_segment", self.first_segment)
+                    //     .int("final_segment", self.final_segment)
+                    //     .ulid("first_ulid", self.first_ulid)
+                    //     .ulid("final_ulid", self.final_ulid)
+                    //     .boolean("reached_end", self.reached_end)
+                    //     .log();
+                    // Reached end of channel run in current segment
+                    self.channel_run_idx = null;
+                    self.current_segment += 1;
+                    continue;
+                }
             } else {
-                // FIXME - remove dev tracing
-                // self.logger.fine()
-                //     .msg("Reached end of channel run in current segment")
-                //     .intx("channel_id", self.channel_id)
-                //     .int("current_segment", self.current_segment)
-                //     .int("first_segment", self.first_segment)
-                //     .int("final_segment", self.final_segment)
-                //     .ulid("first_ulid", self.first_ulid)
-                //     .ulid("final_ulid", self.final_ulid)
-                //     .boolean("reached_end", self.reached_end)
-                //     .log();
-                // Reached end of channel run in current segment
-                self.channel_run_idx = null;
-                self.current_segment += 1;
-                return self.next();
+                self.logger.err()
+                    .msg("Uninitialized channel run index")
+                    .intx("channel_id", self.channel_id)
+                    .int("current_segment", self.current_segment)
+                    .int("first_segment", self.first_segment)
+                    .int("final_segment", self.final_segment)
+                    .ulid("first_ulid", self.first_ulid)
+                    .ulid("final_ulid", self.final_ulid)
+                    .boolean("reached_end", self.reached_end)
+                    .log();
+                return IteratorError.IllegalState;
             }
-        } else {
-            self.logger.err()
-                .msg("Uninitialized channel run index")
-                .intx("channel_id", self.channel_id)
-                .int("current_segment", self.current_segment)
-                .int("first_segment", self.first_segment)
-                .int("final_segment", self.final_segment)
-                .ulid("first_ulid", self.first_ulid)
-                .ulid("final_ulid", self.final_ulid)
-                .boolean("reached_end", self.reached_end)
-                .log();
-            return IteratorError.IllegalState;
         }
     }
 
