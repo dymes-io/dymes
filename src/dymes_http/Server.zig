@@ -106,6 +106,11 @@ pub fn init(allocator: Allocator, engine: *Engine, ingester: *Ingester, options:
     const httpz_config: httpz.Config = .{
         .port = options.request_port,
         .address = resolved_ip_str,
+        // A message may be up to 2 MiB, about 2.7 MiB as base64 JSON; a batch up to `max_request_body_size`.
+        // (httpz's default, 1 MiB, refused single messages above about 750 KiB.) Bodies above the pooled buffer
+        // size are allocated per request, so this doesn't grow the pool.
+        .request = .{ .max_body_size = constants.max_request_body_size },
+        .workers = .{ .large_buffer_size = constants.pooled_large_buffer_size },
     };
 
     var httpz_server = httpz.Server(*SharedContext).init(allocator, httpz_config, shared_ctx) catch |e| {
@@ -119,6 +124,7 @@ pub fn init(allocator: Allocator, engine: *Engine, ingester: *Ingester, options:
 
     var router = try httpz_server.router(.{});
     router.post(constants.http_path_prefix ++ "/messages", RequestContext.handleCreateMsg, .{});
+    router.post(constants.http_path_prefix ++ "/messages/batch", RequestContext.handleCreateMsgBatch, .{});
     router.get(constants.http_path_prefix ++ "/messages/:msg_id", RequestContext.handleQuerySingleMsg, .{});
     router.post(constants.http_path_prefix ++ "/cursors", RequestContext.handleOpenCursor, .{});
     router.get(constants.http_path_prefix ++ "/cursors/:cursor_id", RequestContext.handleTraverseCursor, .{});

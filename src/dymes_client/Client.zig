@@ -67,6 +67,8 @@ append_url: []const u8,
 append_uri: Uri, // Note: URI slices point into URL
 import_url: []const u8,
 import_uri: Uri,
+batch_url: []const u8,
+batch_uri: Uri,
 query_single_url_base: []const u8,
 query_cursor_url_base: []const u8,
 http_client: std.http.Client,
@@ -94,6 +96,17 @@ pub fn init(allocator: std.mem.Allocator, base_url: []const u8) OpenError!Self {
             .msg("Failed to parse import URL")
             .err(e)
             .str("import_url", import_url)
+            .log();
+        return UsageError.IllegalArgument;
+    };
+
+    const batch_url = std.mem.concat(allocator, u8, &.{ base_url, constants.http_path_prefix ++ "/messages/batch" }) catch return AllocationError.OutOfMemory;
+    errdefer allocator.free(batch_url);
+    const batch_uri = Uri.parse(batch_url) catch |e| {
+        logger.err()
+            .msg("Failed to parse batch append URL")
+            .err(e)
+            .str("batch_url", batch_url)
             .log();
         return UsageError.IllegalArgument;
     };
@@ -129,6 +142,8 @@ pub fn init(allocator: std.mem.Allocator, base_url: []const u8) OpenError!Self {
         .append_uri = append_uri,
         .import_url = import_url,
         .import_uri = import_uri,
+        .batch_url = batch_url,
+        .batch_uri = batch_uri,
         .query_single_url_base = query_single_url_base,
         .query_cursor_url_base = query_cursor_url_base,
         .http_client = .{ .allocator = allocator },
@@ -143,6 +158,7 @@ pub fn deinit(self: *Self) void {
     defer self.http_client.deinit();
     defer self.allocator.free(self.append_url);
     defer self.allocator.free(self.import_url);
+    defer self.allocator.free(self.batch_url);
     defer self.allocator.free(self.query_single_url_base);
     defer self.allocator.free(self.query_cursor_url_base);
     defer self.allocator.free(self.json_write_buf);
@@ -157,6 +173,107 @@ pub fn deinit(self: *Self) void {
 }
 
 const MessageCreationError = AllocationError || UsageError || NetworkError || ClientError;
+
+/// One message of a batch (see `appendMessages`).
+pub const BatchMessage = struct {
+    msg_body: []const u8,
+    channel: u128,
+    routing: u128,
+    kv_map: ?std.array_hash_map.StringArrayHashMap([]const u8) = null,
+    /// Correlates to a stored message.
+    correlation_id: ?Ulid = null,
+    /// Correlates to an earlier message of the same batch instead.
+    correlation_index: ?usize = null,
+};
+
+/// Appends messages in one request, in order, synchronized once by the node (`POST /api/v1/messages/batch`).
+/// Writes their ids, in order, to `ids`. `UsageError.UnsupportedOperation`: the node has no batch append (an older
+/// node answers 404, a clustered one 501); append them one at a time instead.
+pub fn appendMessages(self: *Self, messages: []const BatchMessage, ids: []Ulid) MessageCreationError!void {
+    if (messages.len == 0 or messages.len > dymes_msg.BatchCreationRequest.max_messages or ids.len < messages.len) {
+        return UsageError.IllegalArgument;
+    }
+    var arena_impl = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    const entries = arena.alloc(dymes_msg.BatchCreationRequest.Entry, messages.len) catch return AllocationError.OutOfMemory;
+    for (messages, 0..) |_msg, i| {
+        var kv_entries: []dymes_msg.KvPair = &.{};
+        if (_msg.kv_map) |_kv_map| {
+            kv_entries = arena.alloc(dymes_msg.KvPair, _kv_map.count()) catch return AllocationError.OutOfMemory;
+            var kv_it = _kv_map.iterator();
+            var k: usize = 0;
+            while (kv_it.next()) |kv| : (k += 1) {
+                kv_entries[k] = .{ .key = kv.key_ptr.*, .value = kv.value_ptr.* };
+            }
+        }
+        entries[i] = .{
+            .encoded_correlation_id = if (_msg.correlation_id) |_id| (_id.encodeAlloc(arena) catch return AllocationError.OutOfMemory) else null,
+            .correlation_index = _msg.correlation_index,
+            .channel = _msg.channel,
+            .routing = _msg.routing,
+            .kv_entries = kv_entries,
+            .encoded_msg_body = common.base64.encode(arena, _msg.msg_body) catch return AllocationError.OutOfMemory,
+        };
+    }
+
+    var req_json: std.Io.Writer.Allocating = .init(arena);
+    std.json.Stringify.value(dymes_msg.BatchCreationRequest{ .messages = entries }, .{ .whitespace = .minified }, &req_json.writer) catch return AllocationError.OutOfMemory;
+
+    var response: std.Io.Writer.Allocating = .init(arena);
+    const result = self.http_client.fetch(.{
+        .method = .POST,
+        .location = .{ .uri = self.batch_uri },
+        .payload = req_json.written(),
+        .headers = .{ .content_type = .{ .override = "application/json" } },
+        .response_writer = &response.writer,
+    }) catch |e| {
+        self.logger.err()
+            .msg("Failed to append batch")
+            .err(e)
+            .int("messages", messages.len)
+            .log();
+        return switch (e) {
+            error.WriteFailed => NetworkError.SocketFailure,
+            else => ClientError.ClientFailure,
+        };
+    };
+
+    switch (result.status) {
+        .created, .ok => {
+            const parsed = std.json.parseFromSlice(dymes_msg.BatchCreationRequest.Response, arena, response.written(), .{}) catch |e| {
+                self.logger.err()
+                    .msg("Unable to decode batch response")
+                    .err(e)
+                    .log();
+                return ClientError.ClientFailure;
+            };
+            if (parsed.value.ids.len != messages.len) {
+                return ClientError.ClientFailure;
+            }
+            for (parsed.value.ids, 0..) |_encoded, i| {
+                ids[i] = ulid.decode(_encoded) catch return ClientError.ClientFailure;
+            }
+        },
+        .not_found, .not_implemented => return UsageError.UnsupportedOperation,
+        .bad_request => {
+            self.logger.err()
+                .msg("Server rejected our batch")
+                .str("result", response.written())
+                .log();
+            return UsageError.IllegalArgument;
+        },
+        else => {
+            self.logger.err()
+                .msg("Batch append failed")
+                .int("status", @intFromEnum(result.status))
+                .str("result", response.written())
+                .log();
+            return ClientError.ClientFailure;
+        },
+    }
+}
 
 /// Appends a message
 pub fn appendMessage(self: *Self, msg_body: []const u8, channel: u128, routing: u128, kv_map: ?std.array_hash_map.StringArrayHashMap([]const u8), correlation_id: ?Ulid) MessageCreationError!Ulid {
@@ -324,7 +441,7 @@ pub fn queryMessage(self: *Self, msg_id: Ulid) MessageQueryError!?Message {
     const fetch_options: std.http.Client.FetchOptions = .{
         .method = .GET,
         .location = .{ .url = query_url },
-        .max_append_size = dymes_msg.limits.max_frame_size,
+        // The fixed writer bounds the response to the largest frame (a longer one fails the write).
         .response_writer = &response_writer,
     };
 
@@ -382,7 +499,7 @@ pub fn queryMessage(self: *Self, msg_id: Ulid) MessageQueryError!?Message {
             self.logger.err()
                 .msg("Server rejected our request")
                 .int("status", result.status)
-                .str("result", self.msg_result_list.items)
+                .str("result", response_writer.buffered())
                 .log();
             break :unhappy ClientError.ClientFailure;
         },

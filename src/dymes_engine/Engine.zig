@@ -139,9 +139,16 @@ pub fn append(self: *Self, msg_channel: u128, msg_routing: u128, msg_body: []con
 }
 
 pub fn import(self: *Self, msg_id: Ulid, msg_channel: u128, msg_routing: u128, msg_body: []const u8, options: Message.Options) AppendError!Ulid {
-    self.metrics.engine_appends_received.increment();
     self.mtx_engine.lock();
     defer self.mtx_engine.unlock();
+
+    return try self.storeLocked(msg_id, msg_channel, msg_routing, msg_body, options, true);
+}
+
+/// Stores one message under the engine mutex (held by the caller). `durable`: synchronize it with the filesystem
+/// before returning (a single append); a batch stores its messages, then synchronizes once.
+fn storeLocked(self: *Self, msg_id: Ulid, msg_channel: u128, msg_routing: u128, msg_body: []const u8, options: Message.Options, durable: bool) AppendError!Ulid {
+    self.metrics.engine_appends_received.increment();
 
     const final_ulid = self.storage_subsystem.append_store.dataset.hot_journal.dataset_last_ulid;
     if (common.util.isBeforeUlid(msg_id, final_ulid) or msg_id == final_ulid) {
@@ -177,10 +184,83 @@ pub fn import(self: *Self, msg_id: Ulid, msg_channel: u128, msg_routing: u128, m
         }
     } else null;
 
-    const msg_location = try self.storage_subsystem.append(&msg);
+    const msg_location = if (durable) try self.storage_subsystem.append(&msg) else try self.storage_subsystem.store(&msg);
     try self.query_subsystem.appended(msg.channel(), msg_location, corr_location);
     self.metrics.engine_appends_ok.increment();
     return msg.id();
+}
+
+/// One message of a batch (see `appendBatch`).
+pub const BatchEntry = struct {
+    channel: u128,
+    routing: u128,
+    body: []const u8,
+    options: AppendOptions,
+    /// Correlates to an earlier entry of the same batch, whose id is assigned in the batch, instead of
+    /// `options.correlation_id`.
+    correlation_index: ?usize = null,
+};
+
+pub const BatchAppendError = AppendError || UsageError;
+
+/// Appends the given messages in order, under one hold of the engine mutex, synchronizing them with the
+/// filesystem once, at the end. Their ids, written to `ids`, are consecutive in the global order.
+///
+/// Every entry is checked before anything is stored: a `correlation_index` must point at an earlier entry, and a
+/// correlation id at a stored message (`UsageError.IllegalArgument`, nothing stored). If storing fails part-way,
+/// the messages stored before the failure stay (the store is append-only): `written` says how many, their ids are
+/// the first `written` of `ids`. If this call fails with a storage error, this node should go into full cluster
+/// recovery, as for `append`.
+pub fn appendBatch(self: *Self, entries: []const BatchEntry, ids: []Ulid, written: *usize) BatchAppendError!void {
+    written.* = 0;
+    if (ids.len < entries.len) {
+        return UsageError.IllegalArgument;
+    }
+
+    self.mtx_engine.lock();
+    defer self.mtx_engine.unlock();
+
+    for (entries, 0..) |entry, i| {
+        if (entry.correlation_index) |_index| {
+            if (_index >= i or entry.options.correlation_id != NIL_CORRELATION_ID) {
+                self.logger.err()
+                    .msg("Rejected batch: a correlation index must point at an earlier entry")
+                    .int("entry", i)
+                    .int("correlation_index", _index)
+                    .log();
+                return UsageError.IllegalArgument;
+            }
+        } else if (entry.options.correlation_id != NIL_CORRELATION_ID) {
+            if (try self.query_subsystem.immutable_store.lookupLocation(entry.options.correlation_id) == null) {
+                self.logger.err()
+                    .msg("Rejected batch: invalid correlation reference")
+                    .int("entry", i)
+                    .ulid("corr_id", entry.options.correlation_id)
+                    .log();
+                return UsageError.IllegalArgument;
+            }
+        }
+    }
+
+    for (entries, 0..) |entry, i| {
+        var options = entry.options;
+        if (entry.correlation_index) |_index| {
+            options.correlation_id = ids[_index];
+        }
+        const msg_id = try self.nextMessageId();
+        ids[i] = try self.storeLocked(msg_id, entry.channel, entry.routing, entry.body, options, false);
+        written.* = i + 1;
+    }
+
+    self.storage_subsystem.sync() catch |e| {
+        self.logger.err()
+            .msg("Failed to synchronize a batch with the filesystem")
+            .err(e)
+            .int("messages", entries.len)
+            .log();
+        return e;
+    };
+    self.metrics.engine_batch_appends.increment();
 }
 
 pub inline fn nextMessageId(self: *Self) CreationError!Ulid {

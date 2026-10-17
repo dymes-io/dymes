@@ -38,6 +38,7 @@ pub const MultiMsgQueryDto = queries.MultiMsgQueryDto;
 pub const QueryDto = queries.QueryDto;
 
 pub const CreationRequest = @import("dymes_msg/CreationRequest.zig");
+pub const BatchCreationRequest = @import("dymes_msg/BatchCreationRequest.zig");
 pub const CreationRequestBuider = @import("dymes_msg/CreationRequestBuilder.zig");
 pub const ImportRequest = @import("dymes_msg/ImportRequest.zig");
 pub const ImportRequestBuilder = @import("dymes_msg/ImportRequestBuilder.zig");

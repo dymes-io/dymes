@@ -94,6 +94,16 @@ pub inline fn append(self: *Self, message: *const Message) StoreError!MessageLoc
     return try self.append_store.append(message);
 }
 
+/// Stores the given message without synchronizing it with the filesystem (see `sync`).
+pub inline fn store(self: *Self, message: *const Message) StoreError!MessageLocation {
+    return try self.append_store.store(message);
+}
+
+/// Synchronizes stored messages with the filesystem.
+pub inline fn sync(self: *Self) StoreError!void {
+    return try self.append_store.sync();
+}
+
 const StoreOpenError = AppendStore.OpenError;
 fn openAppendStore(logger: *logging.Logger, allocator: std.mem.Allocator, frame_allocator: std.mem.Allocator, allow_init: bool, store_options: MessageStoreOptions) StoreOpenError!*AppendStore {
 
