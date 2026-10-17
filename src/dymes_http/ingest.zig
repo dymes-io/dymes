@@ -35,6 +35,8 @@ pub const Allocators = dymes_vsr.Allocators;
 
 pub const AppendOptions = Engine.AppendOptions;
 pub const AppendError = Engine.AppendError;
+pub const BatchEntry = Engine.BatchEntry;
+pub const BatchAppendError = Engine.BatchAppendError;
 
 pub const IngesterType = enum {
     standalone,
@@ -86,6 +88,11 @@ pub const Standalone = struct {
         options: AppendOptions,
     ) AppendError!Ulid {
         return try self.engine.import(msg_id, msg_channel, msg_routing, msg_body, options);
+    }
+
+    /// Appends a batch (see `Engine.appendBatch`).
+    pub fn appendBatch(self: *Standalone, entries: []const BatchEntry, ids: []Ulid, written: *usize) BatchAppendError!void {
+        return try self.engine.appendBatch(entries, ids, written);
     }
 };
 
@@ -193,6 +200,15 @@ pub const Clustered = struct {
         };
         return msg_id;
     }
+
+    /// Not yet: VSR has no batch op, so a clustered node can't replicate a batch.
+    pub fn appendBatch(self: *Clustered, _: []const BatchEntry, _: []Ulid, written: *usize) BatchAppendError!void {
+        written.* = 0;
+        self.logger.warn()
+            .msg("Batch append is not supported on a clustered node")
+            .log();
+        return common.errors.UsageError.UnsupportedOperation;
+    }
 };
 
 pub const Ingester = union(IngesterType) {
@@ -257,6 +273,14 @@ pub const Ingester = union(IngesterType) {
                 msg_body,
                 options,
             ),
+        };
+    }
+
+    /// Appends a batch, in order, synchronized once: standalone nodes only.
+    pub fn appendBatch(self: *Ingester, entries: []const BatchEntry, ids: []Ulid, written: *usize) BatchAppendError!void {
+        return switch (self.*) {
+            .standalone => |_standalone_ingester| try _standalone_ingester.appendBatch(entries, ids, written),
+            .clustered => |_clustered_ingester| try _clustered_ingester.appendBatch(entries, ids, written),
         };
     }
 

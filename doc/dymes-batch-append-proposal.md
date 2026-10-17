@@ -6,7 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # Proposal: batch append
 
-Status: proposed (2026-10-17).
+Status: implemented (2026-10-17): `POST /api/v1/messages/batch`, documented in
+[dymes-http.md](dymes-http.md#append-messages-in-a-batch). Differences from the proposal: the request body limit is
+8 MiB (raised from httpz's 1 MiB default, which also refused single messages above about 750 KiB), and limits are
+constants for now (`BatchCreationRequest.max_messages`, `http.constants.max_request_body_size`).
 
 Append many messages in one request, under one hold of the engine mutex, with
 one sync at the end. Today a node's write rate is bounded by one HTTP request,

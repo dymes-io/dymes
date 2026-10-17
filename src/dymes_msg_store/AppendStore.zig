@@ -151,25 +151,24 @@ pub fn needsRepair(self: *const Self) bool {
 pub const StoreError = AccessError || CreationError || DatasetError || StateError;
 const Message = @import("dymes_msg").Message;
 
-/// Appends the given message in the dataset.
+/// Appends the given message in the dataset, and synchronizes it with the filesystem.
 ///
 /// If this call fails with `DatasetError.FailedToStore`, then the store is very unhealthy,
 /// most likely to the point where even a cold repair won't work, this node should go into full cluster recovery.
 pub fn append(self: *Self, message: *const Message) StoreError!MessageLocation {
+    const last_dataset_loc = try self.store(message);
+    try self.sync();
+    return last_dataset_loc;
+}
+
+/// Stores the given message in the dataset without synchronizing it with the filesystem: a batch stores its
+/// messages, then calls `sync` once. A rollover syncs the segment it closes.
+///
+/// If this call fails with `DatasetError.FailedToStore`, then the store is very unhealthy (see `append`).
+pub fn store(self: *Self, message: *const Message) StoreError!MessageLocation {
     const last_dataset_loc = self.dataset.store(message) catch |e| {
         self.logger.err()
             .msg("Failed to store message in dataset")
-            .err(e)
-            .ulid("message_id", message.frame_header.id)
-            .int("message_channel", message.frame_header.channel)
-            .str("data_path", self.data_path)
-            .log();
-        return StoreError.FailedToStore;
-    };
-
-    self.dataset.sync() catch |e| {
-        self.logger.err()
-            .msg("Failed to synchronize message store with filesystem")
             .err(e)
             .ulid("message_id", message.frame_header.id)
             .int("message_channel", message.frame_header.channel)
@@ -186,6 +185,18 @@ pub fn append(self: *Self, message: *const Message) StoreError!MessageLocation {
         .log();
 
     return last_dataset_loc;
+}
+
+/// Synchronizes stored messages with the filesystem.
+pub fn sync(self: *Self) StoreError!void {
+    self.dataset.sync() catch |e| {
+        self.logger.err()
+            .msg("Failed to synchronize message store with filesystem")
+            .err(e)
+            .str("data_path", self.data_path)
+            .log();
+        return StoreError.FailedToStore;
+    };
 }
 
 fn healthProbe(context: *anyopaque) bool {

@@ -21,3 +21,7 @@ pub const HttpMetrics = @import("dymes_http/metrics.zig").HttpMetrics;
 test "dymes_http dependencies" {
     std.testing.refAllDeclsRecursive(@This());
 }
+
+test {
+    _ = @import("dymes_http/batch_test.zig");
+}

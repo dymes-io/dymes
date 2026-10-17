@@ -29,6 +29,7 @@ const AllocationError = errors.AllocationError;
 const dymes_msg = @import("dymes_msg");
 const Message = dymes_msg.Message;
 const CreationRequest = dymes_msg.CreationRequest;
+const BatchCreationRequest = dymes_msg.BatchCreationRequest;
 const ImportRequest = dymes_msg.ImportRequest;
 
 const dymes_client = @import("dymes_client");
@@ -142,6 +143,101 @@ pub fn handleCreateMsg(self: *Self, request: *httpz.Request, response: *httpz.Re
         self.respondWithError("Appending message", UsageError.MissingArgument, response);
         return;
     }
+}
+
+/// `POST /api/v1/messages/batch`: appends the messages in order, synchronized once (doc/dymes-batch-append-proposal.md).
+/// `201` with the ids; `400` with nothing appended for an invalid batch; `500` with the ids appended before a storage
+/// failure; `501` on a clustered node.
+pub fn handleCreateMsgBatch(self: *Self, request: *httpz.Request, response: *httpz.Response) !void {
+    const parsed = request.json(BatchCreationRequest) catch |e| {
+        self.respondWithError("Parsing batch creation request", e, response);
+        return;
+    };
+    const batch = parsed orelse {
+        self.respondWithError("Appending batch", UsageError.MissingArgument, response);
+        return;
+    };
+    const count = batch.messages.len;
+    if (count == 0 or count > BatchCreationRequest.max_messages) {
+        self.logger.err()
+            .msg("Rejected batch: message count out of range")
+            .int("messages", count)
+            .int("max_messages", BatchCreationRequest.max_messages)
+            .log();
+        self.respondWithError("Appending batch", UsageError.IllegalArgument, response);
+        return;
+    }
+
+    const arena = request.arena;
+    const entries = arena.alloc(dymes_engine.Engine.BatchEntry, count) catch return AllocationError.OutOfMemory;
+    for (batch.messages, 0..) |_entry, i| {
+        const msg_body = common.base64.decode(arena, _entry.encoded_msg_body) catch |e| {
+            self.respondWithError("Decoding message body", e, response);
+            return;
+        };
+        var kv_headers = std.StringArrayHashMap([]const u8).init(arena);
+        for (_entry.kv_entries) |_kv_pair| {
+            kv_headers.put(_kv_pair.key, _kv_pair.value) catch |e| {
+                self.respondWithError("Building KV headers", e, response);
+                return;
+            };
+        }
+        var options: Message.Options = .{ .transient_kv_headers = kv_headers };
+        if (_entry.encoded_correlation_id) |_encoded_corr_id| {
+            if (_entry.correlation_index != null) {
+                self.respondWithError("Both a correlation id and a correlation index", UsageError.IllegalArgument, response);
+                return;
+            }
+            options.correlation_id = ulid.decode(_encoded_corr_id) catch |e| {
+                self.respondWithError("Decoding correlation id", e, response);
+                return;
+            };
+        }
+        entries[i] = .{
+            .channel = _entry.channel,
+            .routing = _entry.routing,
+            .body = msg_body,
+            .options = options,
+            .correlation_index = _entry.correlation_index,
+        };
+    }
+
+    const ids = arena.alloc(Ulid, count) catch return AllocationError.OutOfMemory;
+    var written: usize = 0;
+    self.shared_ctx.ingester.appendBatch(entries, ids, &written) catch |e| {
+        if (written == 0) {
+            self.respondWithError("Appending batch", e, response);
+            return;
+        }
+        // Stored before the failure, and staying (the store is append-only): say which, so the client can repair.
+        self.logger.err()
+            .msg("A batch failed part-way")
+            .err(e)
+            .int("written", written)
+            .int("messages", count)
+            .log();
+        const encoded = try encodeIds(arena, ids[0..written]);
+        response.status = @intFromEnum(std.http.Status.internal_server_error);
+        try response.json(BatchCreationRequest.FailureResponse{ .@"error" = @errorName(e), .ids = encoded }, .{});
+        return;
+    };
+
+    const encoded = try encodeIds(arena, ids);
+    response.status = @intFromEnum(std.http.Status.created);
+    try response.json(BatchCreationRequest.Response{ .ids = encoded }, .{});
+    defer self.logger.fine()
+        .msg("Batch appended")
+        .int("messages", count)
+        .ulid("first_msg_id", ids[0])
+        .log();
+}
+
+fn encodeIds(arena: Allocator, ids: []const Ulid) AllocationError![]const []const u8 {
+    const encoded = arena.alloc([]const u8, ids.len) catch return AllocationError.OutOfMemory;
+    for (ids, 0..) |_id, i| {
+        encoded[i] = _id.encodeAlloc(arena) catch return AllocationError.OutOfMemory;
+    }
+    return encoded;
 }
 
 pub fn handleQuerySingleMsg(self: *Self, request: *httpz.Request, response: *httpz.Response) !void {
@@ -402,6 +498,7 @@ fn respondWithError(self: *Self, context: []const u8, cause: anyerror, response:
     response.body = @errorName(cause);
     response.status = switch (cause) {
         error.InvalidCharacter, error.Overflow, error.DecodeWrongSize, error.IllegalArgument, error.IllegalConversion, error.MissingArgument => @intFromEnum(std.http.Status.bad_request),
+        error.UnsupportedOperation => @intFromEnum(std.http.Status.not_implemented),
         else => @intFromEnum(std.http.Status.internal_server_error),
     };
 }
