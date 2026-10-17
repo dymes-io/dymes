@@ -123,7 +123,7 @@ pub fn deinit(self: *Self) void {
     defer self.query_subsystem.deinit();
 }
 
-pub const AppendError = AccessError || CreationError || DatasetError || StateError || TimeoutError || AllocationError;
+pub const AppendError = AccessError || CreationError || DatasetError || StateError || TimeoutError || AllocationError || UsageError;
 pub const AppendOptions = Message.Options;
 
 /// Stores the given message.
@@ -149,6 +149,7 @@ pub fn import(self: *Self, msg_id: Ulid, msg_channel: u128, msg_routing: u128, m
 /// before returning (a single append); a batch stores its messages, then synchronizes once.
 fn storeLocked(self: *Self, msg_id: Ulid, msg_channel: u128, msg_routing: u128, msg_body: []const u8, options: Message.Options, durable: bool) AppendError!Ulid {
     self.metrics.engine_appends_received.increment();
+    try self.checkFrameSize(msg_body, options);
 
     const final_ulid = self.storage_subsystem.append_store.dataset.hot_journal.dataset_last_ulid;
     if (common.util.isBeforeUlid(msg_id, final_ulid) or msg_id == final_ulid) {
@@ -221,6 +222,7 @@ pub fn appendBatch(self: *Self, entries: []const BatchEntry, ids: []Ulid, writte
     defer self.mtx_engine.unlock();
 
     for (entries, 0..) |entry, i| {
+        try self.checkFrameSize(entry.body, entry.options);
         if (entry.correlation_index) |_index| {
             if (_index >= i or entry.options.correlation_id != NIL_CORRELATION_ID) {
                 self.logger.err()
@@ -258,9 +260,26 @@ pub fn appendBatch(self: *Self, entries: []const BatchEntry, ids: []Ulid, writte
             .err(e)
             .int("messages", entries.len)
             .log();
+        // Stored but perhaps not on disk: don't report them as stored. The dataset needs repair.
+        written.* = 0;
         return e;
     };
     self.metrics.engine_batch_appends.increment();
+    self.metrics.engine_batch_messages.incrementBy(entries.len);
+}
+
+/// Refuses a message whose frame exceeds `max_frame_size` (`UsageError.IllegalArgument`, a 400 over HTTP). The store
+/// assumes every frame fits and asserts it, so an oversized one stopped the node once the HTTP body limit allowed it.
+fn checkFrameSize(self: *Self, msg_body: []const u8, options: Message.Options) UsageError!void {
+    const frame_size = Message.frameSizeFor(msg_body, options.transient_kv_headers);
+    if (frame_size > dymes_msg.limits.max_frame_size) {
+        self.logger.err()
+            .msg("Rejected message: frame too large")
+            .int("frame_size", frame_size)
+            .int("max_frame_size", dymes_msg.limits.max_frame_size)
+            .log();
+        return UsageError.IllegalArgument;
+    }
 }
 
 pub inline fn nextMessageId(self: *Self) CreationError!Ulid {

@@ -172,7 +172,13 @@ pub fn handleCreateMsgBatch(self: *Self, request: *httpz.Request, response: *htt
     const entries = arena.alloc(dymes_engine.Engine.BatchEntry, count) catch return AllocationError.OutOfMemory;
     for (batch.messages, 0..) |_entry, i| {
         const msg_body = common.base64.decode(arena, _entry.encoded_msg_body) catch |e| {
-            self.respondWithError("Decoding message body", e, response);
+            // Malformed base64 is the client's error (400), not the node's.
+            self.logger.err()
+                .msg("Rejected batch: message body is not base64 (url-safe, padded)")
+                .err(e)
+                .int("entry", i)
+                .log();
+            self.respondWithError("Decoding message body", UsageError.IllegalArgument, response);
             return;
         };
         var kv_headers = std.StringArrayHashMap([]const u8).init(arena);
