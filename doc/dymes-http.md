@@ -88,6 +88,8 @@ a single append. The design is in [dymes-batch-append-proposal.md](dymes-batch-a
 - **`correlation_index`**: correlates to an earlier entry of the same batch, whose id is assigned in the batch. An entry
   gives at most one of `correlation_index` and `encoded_correlation_id`.
 - **Limits:** 1 to 1,000 messages; a request body of at most 8 MiB (which also bounds a single message's request).
+  A message whose frame exceeds 2 MiB is refused with `400`, on this endpoint (before anything is stored) and on
+  `POST /api/v1/messages`.
 
 Answers:
 
@@ -95,7 +97,7 @@ Answers:
 | --- | --- | --- |
 | `201` | `{"ids": ["01M…", …]}` | Stored and synchronized. One id per entry, in request order, consecutive in the global order |
 | `400` | the error name | Invalid JSON, out of limits, a `correlation_index` not pointing at an earlier entry, an `encoded_correlation_id` not stored, or both given. Nothing is stored |
-| `500` | `{"error": "…", "ids": ["01M…", …]}` | Storage failed part-way. The listed messages, stored before the failure, stay (the store is append-only), so a client can repair |
+| `500` | `{"error": "…", "ids": ["01M…", …]}` | Storage failed part-way. The listed messages, stored before the failure, stay (the store is append-only), so a client can repair. If the final synchronization fails, no ids are listed: the messages may not be on disk, and the node needs repair |
 | `501` | the error name | A clustered node: VSR has no batch operation yet |
 
 ```mermaid

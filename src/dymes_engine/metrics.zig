@@ -17,6 +17,7 @@ pub const EngineMetrics = extern struct {
     engine_appends_ok: metrics.CounterU64,
 
     engine_batch_appends: metrics.CounterU64,
+    engine_batch_messages: metrics.CounterU64,
 
     pub fn init() Self {
         return .{
@@ -25,6 +26,7 @@ pub const EngineMetrics = extern struct {
             .engine_appends_received = .init(),
             .engine_appends_ok = .init(),
             .engine_batch_appends = .init(),
+            .engine_batch_messages = .init(),
         };
     }
 
@@ -34,5 +36,6 @@ pub const EngineMetrics = extern struct {
         try w.print("engine_appends_received {d}\n", .{self.engine_appends_received.get()});
         try w.print("engine_appends_ok {d}\n", .{self.engine_appends_ok.get()});
         try w.print("engine_batch_appends {d}\n", .{self.engine_batch_appends.get()});
+        try w.print("engine_batch_messages {d}\n", .{self.engine_batch_messages.get()});
     }
 };

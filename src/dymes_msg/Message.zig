@@ -371,6 +371,20 @@ fn encodePayload(payload: []const u8) []const u8 {
     return encoded;
 }
 
+/// The frame size a message with this body and these KV headers needs: callers check it against
+/// `limits.max_frame_size` before creating the message, which assumes it fits.
+pub fn frameSizeFor(content: []const u8, opt_kv_headers_map: ?std.StringArrayHashMap([]const u8)) u64 {
+    var size: u64 = @sizeOf(FrameHeader) + content.len;
+    if (opt_kv_headers_map) |kv_headers_map| {
+        size += @as(u64, kv_headers_map.count()) * @sizeOf(KvHeader);
+        var mapi = kv_headers_map.iterator();
+        while (mapi.next()) |map_entry| {
+            size += map_entry.key_ptr.len + map_entry.value_ptr.len;
+        }
+    }
+    return std.mem.alignForward(u64, size, 16);
+}
+
 /// Frame sizing calculator
 const FrameSizing = struct {
     frame_size: u32,

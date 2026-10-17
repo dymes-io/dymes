@@ -126,7 +126,12 @@ const Node = struct {
 
     /// Posts a raw JSON body to the batch endpoint and returns the status.
     fn postRaw(node: *Node, json: []const u8) !std.http.Status {
-        const url = try std.mem.concat(node.allocator, u8, &.{ node.client_uri, "/api/v1/messages/batch" });
+        return node.postRawTo("/api/v1/messages/batch", json);
+    }
+
+    /// Posts a raw JSON body to `path` and returns the status.
+    fn postRawTo(node: *Node, path: []const u8, json: []const u8) !std.http.Status {
+        const url = try std.mem.concat(node.allocator, u8, &.{ node.client_uri, path });
         defer node.allocator.free(url);
         var http_client: std.http.Client = .{ .allocator = node.allocator };
         defer http_client.deinit();
@@ -345,4 +350,64 @@ test "batch: a batch across a segment rollover" {
     try node.expectMessage(ids[remaining - 1], bodies[remaining - 1], ids[0]);
     try node.expectMessage(ids[remaining], bodies[remaining], ids[0]);
     try node.expectMessage(ids[across_len - 1], bodies[across_len - 1], ids[0]);
+}
+
+test "batch: an oversized message is refused, and the node stays up" {
+    const allocator = testing.allocator;
+    const prev_level = logging.default_logging_filter_level;
+    defer logging.default_logging_filter_level = prev_level;
+    const buffer = try allocator.alloc(u8, 2048);
+    defer allocator.free(buffer);
+    var stderr_writer = try quietLogging(buffer);
+    try logging.init(allocator, &stderr_writer);
+    defer logging.deinit();
+
+    const node = try Node.start(allocator);
+    defer node.stop();
+
+    // A 3 MiB body: over the 2 MiB frame limit, within the 8 MiB request limit. It stopped the node (a failed
+    // assert in the store) until the engine checked the frame size first.
+    const raw = try allocator.alloc(u8, 3 * 1024 * 1024);
+    defer allocator.free(raw);
+    @memset(raw, 'x');
+    const encoded = try common.base64.encode(allocator, raw);
+    defer allocator.free(encoded);
+
+    const single = try std.fmt.allocPrint(allocator, "{{\"encoded_correlation_id\":null,\"channel\":5,\"routing\":1,\"kv_entries\":[],\"encoded_msg_body\":\"{s}\"}}", .{encoded});
+    defer allocator.free(single);
+    try testing.expectEqual(std.http.Status.bad_request, try node.postRawTo("/api/v1/messages", single));
+
+    const batch = try std.fmt.allocPrint(allocator, "{{\"messages\":[{{\"channel\":5,\"routing\":1,\"encoded_msg_body\":\"aGk=\"}},{{\"channel\":5,\"routing\":1,\"encoded_msg_body\":\"{s}\"}}]}}", .{encoded});
+    defer allocator.free(batch);
+    try testing.expectEqual(std.http.Status.bad_request, try node.postRaw(batch));
+    try testing.expectEqual(@as(u64, 0), node.engine_metrics.engine_appends_ok.get());
+
+    // Still up, and the largest message that fits is stored.
+    const fits = try allocator.alloc(u8, 2 * 1024 * 1024 - 1024);
+    defer allocator.free(fits);
+    @memset(fits, 'y');
+    const id = try node.client.appendMessage(fits, 5, 1, null, null);
+    var ids: [1]Ulid = undefined;
+    try node.client.appendMessages(&[_]BatchMessage{.{ .msg_body = "after", .channel = 5, .routing = 1 }}, &ids);
+    try testing.expect(isBeforeUlid(id, ids[0]));
+    try testing.expectEqual(@as(u64, 2), node.engine_metrics.engine_appends_ok.get());
+}
+
+test "batch: a body that isn't base64 is the client's error" {
+    const allocator = testing.allocator;
+    const prev_level = logging.default_logging_filter_level;
+    defer logging.default_logging_filter_level = prev_level;
+    const buffer = try allocator.alloc(u8, 2048);
+    defer allocator.free(buffer);
+    var stderr_writer = try quietLogging(buffer);
+    try logging.init(allocator, &stderr_writer);
+    defer logging.deinit();
+
+    const node = try Node.start(allocator);
+    defer node.stop();
+
+    try testing.expectEqual(std.http.Status.bad_request, try node.postRaw(
+        "{\"messages\":[{\"channel\":5,\"routing\":1,\"encoded_msg_body\":\"not base64!\"}]}",
+    ));
+    try testing.expectEqual(@as(u64, 0), node.engine_metrics.engine_appends_ok.get());
 }
