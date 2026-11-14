@@ -125,15 +125,7 @@ pub fn init(allocator: std.mem.Allocator, dir: std.fs.Dir) DatasetScannerError!S
     }
 
     // Sort the scan results (simplifies mismatch checking)
-    const srlt = comptime struct {
-        pub fn inner(_: void, a: DatasetFile, b: DatasetFile) bool {
-            if (a.segment_no == b.segment_no and a.file_type == .message_file) {
-                return true;
-            }
-            return a.segment_no < b.segment_no;
-        }
-    }.inner;
-    std.mem.sort(DatasetFile, results, {}, srlt);
+    std.mem.sort(DatasetFile, results, {}, fileLessThan);
 
     logger.fine()
         .msg("Scanned dataset files")
@@ -144,6 +136,15 @@ pub fn init(allocator: std.mem.Allocator, dir: std.fs.Dir) DatasetScannerError!S
         .results = results,
         .mismatched = (num_index_files != num_message_files),
     };
+}
+
+/// Orders by segment, the message file before the index file. A strict order: block sort panics
+/// (integer overflow) on a comparison that holds both ways, as `lessThan(x, x)` did for message files.
+fn fileLessThan(_: void, a: DatasetFile, b: DatasetFile) bool {
+    if (a.segment_no != b.segment_no) {
+        return a.segment_no < b.segment_no;
+    }
+    return a.file_type == .message_file and b.file_type == .index_file;
 }
 
 /// De-initializes the dataset scanner, releasing resources.
@@ -278,5 +279,26 @@ test "DatasetScanner" {
         try testing.expectEqualSlices(u8, expected[3].file_name, missing_files[1].file_name);
         try testing.expectEqualSlices(u8, expected[7].file_name, missing_files[2].file_name);
         try testing.expectEqualSlices(u8, expected[8].file_name, missing_files[3].file_name);
+    }
+}
+
+test "DatasetScanner.fileLessThan" {
+    std.debug.print("test.DatasetScanner.fileLessThan\n", .{});
+    var prng = std.Random.DefaultPrng.init(0);
+    const random = prng.random();
+    var files: [2 * 1500]DatasetFile = undefined;
+    for (0..200) |_| {
+        const num_segments = random.intRangeAtMost(usize, 1, 1500);
+        for (0..num_segments) |seg| {
+            files[2 * seg] = .{ .segment_no = seg, .file_type = .message_file, .file_name = "" };
+            files[2 * seg + 1] = .{ .segment_no = seg, .file_type = .index_file, .file_name = "" };
+        }
+        const items = files[0 .. 2 * num_segments];
+        random.shuffle(DatasetFile, items);
+        std.mem.sort(DatasetFile, items, {}, fileLessThan);
+        for (items, 0..) |file, idx| {
+            try testing.expectEqual(idx / 2, file.segment_no);
+            try testing.expectEqual(if (idx % 2 == 0) DatasetFile.FileType.message_file else .index_file, file.file_type);
+        }
     }
 }
