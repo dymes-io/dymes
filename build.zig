@@ -438,7 +438,7 @@ pub fn build(b: *std.Build) void {
     const run_dymes_msg_store_unit_tests = b.addRunArtifact(dymes_msg_store_unit_tests);
 
     const test_dymes_msg_store_step = b.step("test-msg-store", "Run dymes_msg_store unit tests");
-    test_dymes_msg_store_step.dependOn(&run_dymes_msg_unit_tests.step);
+    test_dymes_msg_store_step.dependOn(&run_dymes_msg_store_unit_tests.step);
 
     //------ Dymes VSR
 
