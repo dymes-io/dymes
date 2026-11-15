@@ -231,6 +231,20 @@ pub fn verify(
                         .int("segment_no", options.segment_no)
                         .log();
 
+                    // The rebuild reads every frame of the message file: a torn last write would fail it.
+                    if (hot_journal) |_journal| {
+                        if (_journal.latest_segment_no == options.segment_no) {
+                            repair_mod.trimMessageFile(logger, allocator, dataset_dir, options.segment_no, _journal.latest_msg_file_eof) catch |er| {
+                                logger.err()
+                                    .msg("Failed to trim message file before index repair")
+                                    .err(er)
+                                    .int("segment_no", options.segment_no)
+                                    .log();
+                                return VerificationDiagnosis.MessageFileNeedsRepair;
+                            };
+                        }
+                    }
+
                     const idx_repair_opts: DataSegment.Options = .{
                         .initialize = true,
                         .timestamp = 0,

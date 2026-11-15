@@ -602,3 +602,102 @@ test "Dataset.rollover" {
     _ = &message_frame;
     _ = &message_body;
 }
+
+const TornEofs = struct { msg_eof: u64, idx_eof: u64 };
+
+/// Stores messages, closes without cleanup (the hot journal stays, as after a crash), then leaves torn bytes past the
+/// journal's ends: the write that never completed, as when the volume filled (sf-dev, 14 Nov 2026).
+fn storeAndTear(allocator: std.mem.Allocator, frame_allocator: std.mem.Allocator, dir: std.fs.Dir, ids: []common.ulid.Ulid) !TornEofs {
+    var dataset = try Dataset.open(allocator, frame_allocator, std.time.nanoTimestamp(), .{ .dir = dir });
+    var ulid_generator = common.ulid.generator();
+    const message_frame: []u8 = try allocator.alloc(u8, 1024);
+    defer allocator.free(message_frame);
+    for (ids, 0..) |*id, idx| {
+        var test_msg = try Message.initOverlay(message_frame, idx, try ulid_generator.next(), idx, 101, "torn tail test: a body long enough that the message file outgrows the index file, as it does in use", .{});
+        _ = try dataset.store(&test_msg);
+        id.* = test_msg.frame_header.id;
+    }
+    try dataset.sync();
+    const eofs: TornEofs = .{ .msg_eof = dataset.hot_journal.latest_msg_file_eof, .idx_eof = dataset.hot_journal.latest_idx_file_eof };
+    dataset.close();
+
+    const torn = [_]u8{0xA5} ** 656;
+    inline for (.{ "dymes_0.msg", "dymes_0.idx" }, .{ torn[0..], torn[0..10] }) |name, bytes| {
+        var f = try dir.openFile(name, .{ .mode = .read_write });
+        defer f.close();
+        try f.seekFromEnd(0);
+        try f.writeAll(bytes);
+    }
+    return eofs;
+}
+
+fn expectReopened(allocator: std.mem.Allocator, frame_allocator: std.mem.Allocator, dir: std.fs.Dir, ids: []const common.ulid.Ulid, msg_eof: u64) !void {
+    var dataset = try Dataset.open(allocator, frame_allocator, std.time.nanoTimestamp(), .{ .dir = dir });
+    defer dataset.close();
+    for (ids) |id| {
+        const msg = try dataset.fetch(id) orelse return error.TestMessageMissing;
+        try testing.expect(msg.frame_header.id.equals(id));
+    }
+    const f = try dir.openFile("dymes_0.msg", .{});
+    defer f.close();
+    try testing.expectEqual(msg_eof, try f.getEndPos());
+}
+
+test "Dataset.reopen trims torn tails to the journal" {
+    std.debug.print("test.Dataset.reopen_torn\n", .{});
+    const allocator = testing.allocator;
+    const out_buffer = try allocator.alloc(u8, 2048);
+    defer allocator.free(out_buffer);
+    var stderr_writer = std.fs.File.stderr().writer(out_buffer);
+    const prev_default_logging_filter_level = logging.default_logging_filter_level;
+    defer logging.default_logging_filter_level = prev_default_logging_filter_level;
+    logging.default_logging_filter_level = logging.LogLevel.none;
+    try logging.init(allocator, &stderr_writer);
+    defer logging.deinit();
+    var fah = FrameAllocator.init(allocator);
+    const frame_allocator = fah.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp_dir.cleanup();
+
+    var ids: [50]common.ulid.Ulid = undefined;
+    const eofs = try storeAndTear(allocator, frame_allocator, tmp_dir.dir, &ids);
+    try expectReopened(allocator, frame_allocator, tmp_dir.dir, &ids, eofs.msg_eof);
+
+    const idx = try tmp_dir.dir.openFile("dymes_0.idx", .{});
+    defer idx.close();
+    try testing.expectEqual(eofs.idx_eof, try idx.getEndPos());
+    // Trimmed, not rebuilt (a rebuild writes timestamp 0): rebuilding a full segment on every start took minutes.
+    var hdr_buf: [@sizeOf(IndexFile.Header)]u8 align(@alignOf(IndexFile.Header)) = undefined;
+    _ = try idx.preadAll(&hdr_buf, 0);
+    const hdr: *const IndexFile.Header = @ptrCast(&hdr_buf);
+    try testing.expect(hdr.timestamp != 0);
+}
+
+test "Dataset.reopen rebuilds a lost index from a torn message file" {
+    std.debug.print("test.Dataset.reopen_rebuild\n", .{});
+    const allocator = testing.allocator;
+    const out_buffer = try allocator.alloc(u8, 2048);
+    defer allocator.free(out_buffer);
+    var stderr_writer = std.fs.File.stderr().writer(out_buffer);
+    const prev_default_logging_filter_level = logging.default_logging_filter_level;
+    defer logging.default_logging_filter_level = prev_default_logging_filter_level;
+    logging.default_logging_filter_level = logging.LogLevel.none;
+    try logging.init(allocator, &stderr_writer);
+    defer logging.deinit();
+    var fah = FrameAllocator.init(allocator);
+    const frame_allocator = fah.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp_dir.cleanup();
+
+    var ids: [50]common.ulid.Ulid = undefined;
+    const eofs = try storeAndTear(allocator, frame_allocator, tmp_dir.dir, &ids);
+    // The index lost entries the journal counts: only a rebuild from the message file can restore them.
+    {
+        var f = try tmp_dir.dir.openFile("dymes_0.idx", .{ .mode = .read_write });
+        defer f.close();
+        try f.setEndPos(eofs.idx_eof - 3 * IndexFile.IndexEntry.idx_entry_size);
+    }
+    try expectReopened(allocator, frame_allocator, tmp_dir.dir, &ids, eofs.msg_eof);
+}

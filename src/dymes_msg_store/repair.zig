@@ -71,6 +71,29 @@ pub const VerifyResults = struct {
     lsn: u64,
 };
 
+/// Trims a message file to the journal's end of file, dropping a write that never completed.
+pub fn trimMessageFile(logger: *Logger, allocator: Allocator, dir: std.fs.Dir, segment_no: u64, journal_eof: u64) SegmentConsistencyFailure!void {
+    const seg_msg_file_name = std.fmt.allocPrint(allocator, constants.msg_file_name_fmt, .{segment_no}) catch return SegmentConsistencyFailure.ResourcesExhausted;
+    defer allocator.free(seg_msg_file_name);
+
+    const msg_file = dir.openFile(seg_msg_file_name, .{ .lock = .shared, .mode = .read_write }) catch return SegmentConsistencyFailure.NonMessageFile;
+    defer msg_file.close();
+
+    const eof_off = msg_file.getEndPos() catch return SegmentConsistencyFailure.MessageFileCorrupted;
+    if (journal_eof > eof_off) {
+        return SegmentConsistencyFailure.MessageFileTruncated;
+    }
+    if (journal_eof < eof_off) {
+        logger.warn()
+            .msg("Truncating torn message file")
+            .int("segment_no", segment_no)
+            .int("expected_eof", journal_eof)
+            .int("actual_eof", eof_off)
+            .log();
+        msg_file.setEndPos(journal_eof) catch return SegmentConsistencyFailure.MessageFileTorn;
+    }
+}
+
 /// Performs a consistency check on a datastore (message file + index file combo).
 /// Returns the Ulid of the last valid message in the store, or a consistency failure.
 pub fn verifySegment(logger: *Logger, allocator: Allocator, frame_allocator: Allocator, hot_journal: ?JournalFile.DatasetJournal, options: SegmentOptions) SegmentConsistencyFailure!?VerifyResults {
@@ -82,9 +105,11 @@ pub fn verifySegment(logger: *Logger, allocator: Allocator, frame_allocator: All
     const seg_idx_file_name = std.fmt.allocPrint(allocator, constants.idx_file_name_fmt, .{options.segment_no}) catch return SegmentConsistencyFailure.ResourcesExhausted;
     defer allocator.free(seg_idx_file_name);
 
+    // Writable so that a torn tail past the journal can be trimmed (a read-only file refused it, so a torn segment
+    // always needed manual repair).
     const open_flags: std.fs.File.OpenFlags = .{
         .lock = .shared,
-        .mode = .read_only,
+        .mode = .read_write,
     };
 
     const idx_file = options.dir.openFile(seg_idx_file_name, open_flags) catch |e| {
@@ -173,7 +198,7 @@ pub fn verifySegmentIndexFile(
                 if (_journal.latest_idx_file_eof > eof_off) {
                     return SegmentConsistencyFailure.IndexFileTruncated;
                 }
-                break :adjusted_eof_val _journal.latest_msg_file_eof;
+                break :adjusted_eof_val _journal.latest_idx_file_eof;
             }
         }
         break :adjusted_eof_val eof_off;
