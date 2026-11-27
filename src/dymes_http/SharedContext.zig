@@ -213,6 +213,14 @@ pub fn cursor(self: *Self, cursor_id: u64) ?*QueryCursor {
     return self.query_cursors.get(cursor_id);
 }
 
+/// Whether the cursor was closed while a traversal holds it.
+pub fn cursorClosing(self: *Self, cursor_id: u64) bool {
+    self.query_cursors_mtx.lock();
+    defer self.query_cursors_mtx.unlock();
+
+    return self.cursors_closing.contains(cursor_id);
+}
+
 /// The cursor, held for a traversal until returnCursor: a close meanwhile only marks it. Null when it is unknown or
 /// already being closed.
 pub fn borrowCursor(self: *Self, cursor_id: u64) ?*QueryCursor {
