@@ -14,6 +14,7 @@
 #   DYMES_BIN     directory holding dymes_node and dymes_bench (default: zig-out/bin)
 #   DYMES_IMAGE   run the node from this container image instead (4 CPUs, DYMES_CPUS to change)
 #   BENCH_PORT    HTTP port (default: 16510)
+#   DYMES_CURSOR_IDLE_S  the native node's cursor idle timeout in seconds (default: the node's)
 #   BENCH_ARGS    extra arguments for every `dymes_bench run`
 
 set -euo pipefail
@@ -51,6 +52,7 @@ engine:
   http:
     host: "127.0.0.1"
     port: $port
+${DYMES_CURSOR_IDLE_S:+    cursor_idle_timeout_s: $DYMES_CURSOR_IDLE_S}
 YAML
     "$bin/dymes_node" --config "$work.yaml" > "$results/$1.node.log" 2>&1 &
     node_pid=$!
