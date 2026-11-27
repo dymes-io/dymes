@@ -16,7 +16,7 @@ Dependencies
     zeit["zeit (v0.7.0)"]
     zig-clap["zig-clap (v0.11.0)"]
     zig-yaml["zig-yaml (zig-0.15.0-support)"]
-    httpzig["http.zig (master)"]
+    httpzig["http.zig (dymes-io fork)"]
     zimq["zimq (zig-0.15.2)"]
 ```
 
@@ -57,12 +57,16 @@ zig fetch --save https://github.com/carlmontanari/zig-yaml/tarball/feat/zig-0.15
 #zig fetch --save https://github.com/kubkon/zig-yaml/archive/refs/tags/0.1.1.tar.gz
 ```
 
-## [http.zig](https://github.com/karlseguin/http.zig) master
+## [http.zig](https://github.com/dymes-io/http.zig) fork (`dymes/shared-queue`)
+
+A fork of [karlseguin/http.zig](https://github.com/karlseguin/http.zig) at `18e0f2d` with one change: its thread
+pool has one queue for all its threads. Upstream gives each thread its own queue, and a request queued on a thread
+that is running a long request waits for it to end.
 
 An HTTP/1.1 server for Zig.
 
 ```shell
-zig fetch --save "git+https://github.com/karlseguin/http.zig#master"
+zig fetch --save=httpz "git+https://github.com/dymes-io/http.zig?ref=dymes/shared-queue#9024636f0457544b4d6fec51513de1396fb977e3"
 ```
 
 ## [zimq](https://github.com/uyha/zimq)
