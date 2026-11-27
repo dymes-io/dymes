@@ -213,6 +213,9 @@ pub fn execute(self: *Self, request: QueryRequest) QueryExecutionError!*QueryCur
                 .any("query", request.query)
                 .any("filters", request.filters)
                 .log();
+            if (common.util.isBeforeUlid(start_end.range_end, start_end.range_start)) {
+                return rejectInvertedRange(self.logger, start_end.range_start, start_end.range_end);
+            }
             if (!self.immutable_store.segments_ulid_idx.overlaps(start_end.range_start, start_end.range_end)) {
                 break :cursor_lazy_range try QueryCursor.open(self.allocator, .{ .empty_result = &empty_result });
             }
@@ -230,6 +233,9 @@ pub fn execute(self: *Self, request: QueryRequest) QueryExecutionError!*QueryCur
                 .log();
             // An empty store, or a range wholly outside it, has nothing to return (the builders assume at least
             // one segment and clamp out-of-store bounds to the store's first or last id).
+            if (common.util.isBeforeUlid(channel_start_end.range_end, channel_start_end.range_start)) {
+                return rejectInvertedRange(self.logger, channel_start_end.range_start, channel_start_end.range_end);
+            }
             if (!self.immutable_store.segments_ulid_idx.overlaps(channel_start_end.range_start, channel_start_end.range_end)) {
                 break :cursor_lazy_range try QueryCursor.open(self.allocator, .{ .empty_result = &empty_result });
             }
@@ -264,6 +270,17 @@ pub fn execute(self: *Self, request: QueryRequest) QueryExecutionError!*QueryCur
         .log();
 
     return cursor;
+}
+
+/// A range that ends before it starts is the client's mistake: an error for that request, not a failed assertion
+/// that takes the node down.
+fn rejectInvertedRange(logger: *logging.Logger, range_start: Ulid, range_end: Ulid) UsageError {
+    logger.warn()
+        .msg("Rejected query: the range ends before it starts")
+        .ulid("range_start", range_start)
+        .ulid("range_end", range_end)
+        .log();
+    return UsageError.IllegalArgument;
 }
 
 test "QuerySubsystem" {
