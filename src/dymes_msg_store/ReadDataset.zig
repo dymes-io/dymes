@@ -1101,7 +1101,8 @@ pub const ChannelIterator = struct {
     reached_first: bool = false,
 
     fn init(read_dataset: *ReadDataset, channel_id: u128, first_ulid: Ulid, final_ulid: Ulid, first_segment: u64, final_segment: u64) AllocationError!ChannelIterator {
-        assert(isBeforeUlid(first_ulid, final_ulid));
+        // A range of one id is a range: a query starting at the store's newest message is clamped to it.
+        assert(!isBeforeUlid(final_ulid, first_ulid));
         assert(first_segment <= final_segment);
 
         const msg_buffer = read_dataset.frame_allocator.alloc(u8, msg_limits.max_frame_size) catch return AllocationError.OutOfMemory;
@@ -1487,6 +1488,7 @@ test "ReadDataset.ChannelIterator.bounds" {
     const before_first_ulid: Ulid = try ulid_generator.next();
     const first_ulid: Ulid = try ulid_generator.next();
     var final_ulid: Ulid = undefined;
+    var newest_ulid: Ulid = undefined;
     const channel_id: u128 = 123456789;
 
     {
@@ -1524,8 +1526,9 @@ test "ReadDataset.ChannelIterator.bounds" {
             try Message.initOverlay(message_frame, 5, final_ulid, channel_id, 101, message_body, .{});
         _ = try dataset.store(&final_msg);
 
+        newest_ulid = try ulid_generator.next();
         var after_final_msg =
-            try Message.initOverlay(message_frame, 6, try ulid_generator.next(), channel_id, 101, message_body, .{});
+            try Message.initOverlay(message_frame, 6, newest_ulid, channel_id, 101, message_body, .{});
         _ = try dataset.store(&after_final_msg);
 
         try dataset.sync();
@@ -1553,5 +1556,15 @@ test "ReadDataset.ChannelIterator.bounds" {
             .int("actual_count", actual_count)
             .log();
         try testing.expectEqual(5, actual_count);
+    }
+
+    // A range of one id, the store's newest message: that message, not a panic
+    {
+        var it = try read_dataset.channelIterator(channel_id, newest_ulid, newest_ulid, 0, 0);
+        defer it.close(frame_allocator);
+
+        const only = try it.next() orelse return error.TestExpectedMessage;
+        try testing.expectEqual(newest_ulid, only.id());
+        try testing.expectEqual(null, try it.next());
     }
 }
