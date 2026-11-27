@@ -21,3 +21,6 @@ pub const max_request_body_size: usize = 8 * 1024 * 1024;
 
 /// Size of httpz's pooled large buffers: larger bodies are allocated per request.
 pub const pooled_large_buffer_size: usize = 64 * 1024;
+
+/// A cursor no request has used for this long is closed (`engine.http.cursor_idle_timeout_s`)
+pub const default_cursor_idle_timeout_ms: i64 = 5 * std.time.ms_per_min;
