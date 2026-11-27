@@ -38,3 +38,6 @@ const std = @import("std");
 comptime {
     std.debug.assert(max_message_size < max_message_file_size - 128);
 }
+
+/// Maximum closed segments kept open for channel reads (two files each)
+pub const max_open_channel_read_segments = 32;

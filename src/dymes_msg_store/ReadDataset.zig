@@ -39,6 +39,7 @@ const SegmentsUlidIndex = @import("SegmentsUlidIndex.zig");
 const MessageIndex = @import("MessageIndex.zig");
 const MessageFile = @import("MessageFile.zig");
 const ChannelIndex = @import("ChannelIndex.zig");
+const ChannelIndexFile = @import("ChannelIndexFile.zig");
 
 /// Message store dataset options
 pub const Options = struct {
@@ -105,6 +106,29 @@ segments_ulid_idx: *SegmentsUlidIndex,
 
 /// Dataset lock
 mtx_dataset: std.Thread.Mutex.Recursive = .init,
+
+/// Channel directory of each closed segment, by segment number, from its channel index file. Null for the
+/// segment being appended to, and for a segment whose file could not be built: those are read through the
+/// segment cache.
+channel_dirs: std.array_list.Managed(?ChannelIndexFile.Directory),
+
+/// Open files of the closed segments channel reads were last in
+light_segments: [limits.max_open_channel_read_segments]?LightSegment = [_]?LightSegment{null} ** limits.max_open_channel_read_segments,
+light_clock: u64 = 0,
+
+/// A closed segment's message file and channel index file, open for reading. Channel reads use these and
+/// never load the segment's index.
+const LightSegment = struct {
+    segment_no: u64,
+    msg_file: std.fs.File,
+    chx_file: std.fs.File,
+    last_used: u64,
+
+    fn close(self: *LightSegment) void {
+        self.msg_file.close();
+        self.chx_file.close();
+    }
+};
 
 /// Opens a read dataset.
 ///
@@ -188,7 +212,140 @@ pub fn open(gpa: std.mem.Allocator, frame_allocator: std.mem.Allocator, segments
         .first_ulid = first_ulid,
         .last_ulid = last_ulid,
         .segments_ulid_idx = segments_ulid_idx,
+        .channel_dirs = std.array_list.Managed(?ChannelIndexFile.Directory).init(gpa),
     };
+}
+
+/// Loads the channel directory of every closed segment, building the channel index file of each segment that
+/// has none it can trust (all of them, the first time a store is opened by a node that has them).
+pub fn prepareChannelIndex(self: *Self) AllocationError!void {
+    self.mtx_dataset.lock();
+    defer self.mtx_dataset.unlock();
+    if (self.num_segments == 0) return;
+
+    self.channel_dirs.ensureTotalCapacity(self.num_segments) catch return AllocationError.OutOfMemory;
+    var built: u64 = 0;
+    // Every segment but the last, which is being appended to
+    for (self.channel_dirs.items.len..self.num_segments - 1) |segment_no| {
+        const loaded = ChannelIndexFile.load(self.gpa, self.dir, segment_no) catch null;
+        if (loaded == null) built += 1;
+        self.channel_dirs.appendAssumeCapacity(loaded orelse self.buildChannelIndex(segment_no));
+        if (loaded == null and built % 32 == 0) {
+            self.logger.info()
+                .msg("Building segment channel indexes")
+                .int("segment_no", segment_no)
+                .int("num_segments", self.num_segments)
+                .log();
+        }
+    }
+    if (built > 0) {
+        self.logger.info()
+            .msg("Segment channel indexes built")
+            .int("built", built)
+            .int("num_segments", self.num_segments)
+            .log();
+    }
+}
+
+/// Loads the segment being appended to into the segment cache, through which it is read: once when the store
+/// opens, not under the first read that reaches it. Needs the segments ULID index.
+pub fn warmActiveSegment(self: *Self) void {
+    self.mtx_dataset.lock();
+    defer self.mtx_dataset.unlock();
+    if (self.num_segments == 0) return;
+    if (self.acquireSegment(self.num_segments - 1)) |dse| self.releaseSegment(dse) else |_| {}
+}
+
+fn buildChannelIndex(self: *Self, segment_no: u64) ?ChannelIndexFile.Directory {
+    return ChannelIndexFile.build(self.gpa, self.dir, segment_no) catch |e| {
+        self.logger.warn()
+            .msg("Failed to build a segment's channel index; its channels are read through the segment cache")
+            .err(e)
+            .int("segment_no", segment_no)
+            .log();
+        return null;
+    };
+}
+
+/// A segment was closed by a rollover: from now on it is read through its channel index file.
+pub fn segmentClosed(self: *Self, segment_no: u64) void {
+    self.mtx_dataset.lock();
+    defer self.mtx_dataset.unlock();
+    while (self.channel_dirs.items.len < segment_no) {
+        const missing = self.channel_dirs.items.len;
+        self.channel_dirs.append(self.buildChannelIndex(missing)) catch return;
+    }
+    if (self.channel_dirs.items.len == segment_no) {
+        self.channel_dirs.append(self.buildChannelIndex(segment_no)) catch return;
+    }
+}
+
+fn channelDirectory(self: *Self, segment_no: u64) ?*const ChannelIndexFile.Directory {
+    if (segment_no >= self.channel_dirs.items.len) return null;
+    if (self.channel_dirs.items[segment_no]) |*directory| return directory;
+    return null;
+}
+
+/// Stops using a segment's channel index file and removes it: it did not match the segment. The segment is read
+/// through the segment cache until the file is rebuilt, when the store is next opened.
+fn dropChannelDirectory(self: *Self, segment_no: u64) void {
+    for (&self.light_segments) |*slot| {
+        if (slot.*) |*light| {
+            if (light.segment_no == segment_no) {
+                light.close();
+                slot.* = null;
+            }
+        }
+    }
+    if (self.channel_dirs.items[segment_no]) |*directory| directory.deinit(self.gpa);
+    self.channel_dirs.items[segment_no] = null;
+    ChannelIndexFile.remove(self.dir, segment_no);
+}
+
+fn lightSegment(self: *Self, segment_no: u64) AccessError!*LightSegment {
+    self.light_clock += 1;
+    var free_slot: ?*?LightSegment = null;
+    var oldest_slot: *?LightSegment = &self.light_segments[0];
+    for (&self.light_segments) |*slot| {
+        if (slot.*) |*light| {
+            if (light.segment_no == segment_no) {
+                light.last_used = self.light_clock;
+                return light;
+            }
+            if (oldest_slot.* == null or light.last_used < oldest_slot.*.?.last_used) oldest_slot = slot;
+        } else if (free_slot == null) {
+            free_slot = slot;
+        }
+    }
+
+    var name_buf: [64]u8 = undefined;
+    const msg_name = std.fmt.bufPrint(&name_buf, MessageFile.msg_file_name_fmt, .{segment_no}) catch unreachable;
+    var msg_file = self.dir.openFile(msg_name, .{ .mode = .read_only }) catch return AccessError.AccessFailure;
+    errdefer msg_file.close();
+    const chx_file = try ChannelIndexFile.openForRead(self.dir, segment_no);
+
+    const slot = free_slot orelse oldest_slot;
+    if (slot.*) |*evicted| evicted.close();
+    slot.* = .{ .segment_no = segment_no, .msg_file = msg_file, .chx_file = chx_file, .last_used = self.light_clock };
+    return &slot.*.?;
+}
+
+/// Reads the frame a channel index run entry points at, and checks it is that message.
+fn readRunFrame(light: *LightSegment, run_entry: ChannelIndexFile.RunEntry, channel_id: u128, msg_buffer: []u8) (AccessError || StateError)!Message {
+    if (run_entry.frame_size < @sizeOf(dymes_msg.FrameHeader) or run_entry.frame_size > msg_buffer.len) {
+        return StateError.InconsistentState;
+    }
+    const frame = msg_buffer[0..run_entry.frame_size];
+    if ((light.msg_file.preadAll(frame, run_entry.file_offset) catch return AccessError.AccessFailure) != frame.len) {
+        return StateError.DataTruncated;
+    }
+    // The header is checked before anything is taken from it: these bytes may not be a frame at all
+    const frame_header: *const dymes_msg.FrameHeader = @ptrCast(@alignCast(msg_buffer.ptr));
+    if (!frame_header.verifyChecksum()) return StateError.ChecksumFailure;
+    if (!frame_header.id.equals(run_entry.id) or frame_header.channel != channel_id or frame_header.frame_size != run_entry.frame_size) {
+        return StateError.InconsistentState;
+    }
+    return Message.overlay(msg_buffer);
 }
 
 /// Closes (de-initializes) a dataset.
@@ -207,6 +364,14 @@ pub fn close(self: *Self) void {
         .msg("Closing read dataset")
         .log();
     defer self.segments_cache.deinit();
+    defer self.channel_dirs.deinit();
+    for (self.channel_dirs.items) |*maybe_directory| {
+        if (maybe_directory.*) |*directory| directory.deinit(self.gpa);
+    }
+    for (&self.light_segments) |*slot| {
+        if (slot.*) |*light| light.close();
+        slot.* = null;
+    }
 
     self.status.opened = false;
     self.logger
@@ -510,7 +675,10 @@ pub fn populateSegmentsUlidIndex(self: *Self, segments_ulid_idx: *SegmentsUlidIn
         .int("num_segments", self.num_segments)
         .log();
     for (0..self.num_segments) |segment_no| {
-        if (self.segments_cache.acquire(segment_no)) |entry| {
+        if (self.channelDirectory(segment_no)) |directory| {
+            // A closed segment's bounds are in its channel index: no need to open it
+            try segments_ulid_idx.update(segment_no, directory.first_id, directory.last_id);
+        } else if (self.segments_cache.acquire(segment_no)) |entry| {
             defer self.segments_cache.release(entry);
             try segments_ulid_idx.update(segment_no, entry.data_segment.index_file.first_ulid, entry.data_segment.index_file.last_ulid);
         } else {
@@ -1087,6 +1255,9 @@ test "ReadDataset.RangeIterator" {
 }
 
 pub const ChannelIterator = struct {
+    const chunk_len = 128;
+    const no_segment = std.math.maxInt(u64);
+
     logger: *logging.Logger,
     channel_id: u128,
     current_segment: u64,
@@ -1096,9 +1267,14 @@ pub const ChannelIterator = struct {
     final_segment: u64,
     read_dataset: *ReadDataset,
     reached_end: bool = false,
-    channel_run_idx: ?usize,
+    /// Position in the channel's run in the current segment; null until it has been found
+    run_pos: ?u64 = null,
     msg_buffer: []u8,
-    reached_first: bool = false,
+    /// Run entries read ahead from the current segment's channel index file
+    chunk: [chunk_len]ChannelIndexFile.RunEntry = undefined,
+    chunk_segment: u64 = no_segment,
+    chunk_start: u64 = 0,
+    chunk_count: usize = 0,
 
     fn init(read_dataset: *ReadDataset, channel_id: u128, first_ulid: Ulid, final_ulid: Ulid, first_segment: u64, final_segment: u64) AllocationError!ChannelIterator {
         assert(isBeforeUlid(first_ulid, final_ulid));
@@ -1116,211 +1292,161 @@ pub const ChannelIterator = struct {
             .first_segment = first_segment,
             .final_segment = final_segment,
             .current_segment = first_segment,
-            .channel_run_idx = null,
             .msg_buffer = msg_buffer,
         };
     }
 
     pub fn close(self: *ChannelIterator, frame_allocator: std.mem.Allocator) void {
         defer frame_allocator.free(self.msg_buffer);
-        // FIXME - remove dev tracing
-        // self.logger.fine()
-        //     .msg("Closing channel iterator")
-        //     .intx("channel_id", self.channel_id)
-        //     .int("current_segment", self.current_segment)
-        //     .int("first_segment", self.first_segment)
-        //     .int("final_segment", self.final_segment)
-        //     .ulid("first_ulid", self.first_ulid)
-        //     .ulid("final_ulid", self.final_ulid)
-        //     .boolean("reached_end", self.reached_end)
-        //     .log();
+    }
+
+    inline fn nextSegment(self: *ChannelIterator) void {
+        self.current_segment += 1;
+        self.run_pos = null;
+    }
+
+    inline fn end(self: *ChannelIterator) void {
+        self.run_pos = null;
+        self.reached_end = true;
+    }
+
+    /// The run entry at `pos` of the channel's run in the current segment, through the read-ahead chunk.
+    fn runEntry(self: *ChannelIterator, light: *LightSegment, directory: *const ChannelIndexFile.Directory, dir_entry: ChannelIndexFile.DirEntry, pos: u64) AccessError!ChannelIndexFile.RunEntry {
+        if (self.chunk_segment != self.current_segment or pos < self.chunk_start or pos >= self.chunk_start + self.chunk_count) {
+            self.chunk_count = try ChannelIndexFile.readRun(light.chx_file, directory, dir_entry, pos, &self.chunk);
+            self.chunk_segment = self.current_segment;
+            self.chunk_start = pos;
+        }
+        return self.chunk[@intCast(pos - self.chunk_start)];
+    }
+
+    /// Position in an in-memory channel run of the first message with id `first_ulid` or later. The segment's
+    /// message index gives the offset of that id, and a run is in offset order.
+    fn runLowerBound(dse: DataSegmentsCache.DataSegmentEntry, channel_run: []const ChannelIndex.ChannelRunEntry, first_ulid: Ulid) u64 {
+        const index_entries = dse.message_index.entries[0..dse.message_index.append_idx];
+        var low: usize = 0;
+        var high: usize = index_entries.len;
+        while (low < high) {
+            const mid = (low + high) / 2;
+            if (isBeforeUlid(index_entries[mid].id, first_ulid)) low = mid + 1 else high = mid;
+        }
+        if (low == index_entries.len) return channel_run.len;
+        const first_offset = index_entries[low].msg_file_offset;
+
+        low = 0;
+        high = channel_run.len;
+        while (low < high) {
+            const mid = (low + high) / 2;
+            if (channel_run[mid].file_offset < first_offset) low = mid + 1 else high = mid;
+        }
+        return low;
     }
 
     pub fn next(self: *ChannelIterator) IteratorError!?Message {
+        const read_dataset = self.read_dataset;
         // A loop, not a recursive call per segment: a read across many segments overflowed a worker
         // thread's stack (#7).
         while (true) {
-            // FIXME - remove dev tracing
-            // self.logger.fine()
-            //     .msg("Start of next iteration")
-            //     .intx("channel_id", self.channel_id)
-            //     .int("current_segment", self.current_segment)
-            //     .int("first_segment", self.first_segment)
-            //     .int("final_segment", self.final_segment)
-            //     .ulid("first_ulid", self.first_ulid)
-            //     .ulid("final_ulid", self.final_ulid)
-            //     .boolean("reached_end", self.reached_end)
-            //     .log();
-
             if (self.reached_end) {
-                // FIXME - remove dev tracing
-                // self.logger.fine()
-                //     .msg("Short-circuiting next()")
-                //     .intx("channel_id", self.channel_id)
-                //     .int("current_segment", self.current_segment)
-                //     .int("first_segment", self.first_segment)
-                //     .int("final_segment", self.final_segment)
-                //     .ulid("first_ulid", self.first_ulid)
-                //     .ulid("final_ulid", self.final_ulid)
-                //     .boolean("reached_end", self.reached_end)
-                //     .log();
-
-                // Short-circuit
+                return null;
+            }
+            if (self.current_segment > self.final_segment) {
+                self.end();
                 return null;
             }
 
-            // Sets channel_run to first segment containing a channel run for channel_id, scanning current segment up to final segment for channel matches
-            const channel_run: []const ChannelIndex.ChannelRunEntry = run_val: {
-                for (self.current_segment..self.final_segment + 1) |active_segment| {
-                    const dse = try self.read_dataset.acquireSegment(active_segment);
-                    defer self.read_dataset.releaseSegment(dse);
-                    if (dse.channel_index.lookup(self.channel_id)) |channel_run| {
-                        assert(channel_run.len != 0);
-                        if (self.channel_run_idx == null) {
-                            self.channel_run_idx = 0;
-                        }
-                        self.current_segment = active_segment;
-                        break :run_val channel_run;
-                    } else {
-                        // FIXME - remove dev tracing
-                        // self.logger.fine()
-                        //     .msg("No channel matches in current segment")
-                        //     .intx("channel_id", self.channel_id)
-                        //     .int("current_segment", self.current_segment)
-                        //     .int("first_segment", self.first_segment)
-                        //     .int("final_segment", self.final_segment)
-                        //     .ulid("first_ulid", self.first_ulid)
-                        //     .ulid("final_ulid", self.final_ulid)
-                        //     .boolean("reached_end", self.reached_end)
-                        //     .log();
-                        self.channel_run_idx = null;
-                        // A segment without this channel is not the end: later segments may hold more of it. The
-                        // loop ends after final_segment, and final_ulid bounds what is returned.
-                        continue;
-                    }
-                }
-                // FIXME - remove dev tracing
-                // self.logger.fine()
-                //     .msg("No segment has messages for channel")
-                //     .intx("channel_id", self.channel_id)
-                //     .int("current_segment", self.current_segment)
-                //     .int("first_segment", self.first_segment)
-                //     .int("final_segment", self.final_segment)
-                //     .ulid("first_ulid", self.first_ulid)
-                //     .ulid("final_ulid", self.final_ulid)
-                //     .boolean("reached_end", self.reached_end)
-                //     .log();
+            read_dataset.mtx_dataset.lock();
+            defer read_dataset.mtx_dataset.unlock();
 
-                // No segment has messages for channel
-                self.channel_run_idx = null;
-                self.reached_end = true;
-                return null;
-            };
-
-            // Fetch next from current segment's channel run
-            if (self.channel_run_idx) |_channel_run_idx| {
-                if (_channel_run_idx < channel_run.len) {
-                    if (self.reached_first) {
-                        const run_entry = channel_run[_channel_run_idx];
-                        const seg_loc: SegmentLocation = .{ .segment_no = self.current_segment, .file_offset = run_entry.file_offset, .frame_size = run_entry.frame_size };
-                        const msg = try self.read_dataset.fetchFromSegment(seg_loc, self.msg_buffer);
-                        if (msg) |_msg| {
-                            if (isSameOrBeforeUlid(_msg.id(), self.final_ulid)) {
-                                defer self.channel_run_idx = _channel_run_idx + 1;
-                                return _msg;
-                            }
-                            // Overshot final message
-                            self.channel_run_idx = null;
-                            self.reached_end = true;
-                            return null;
-                        } else {
-                            return IteratorError.EntryNotFound;
-                        }
-                    } else {
-                        for (_channel_run_idx..channel_run.len) |_cridx| {
-                            const run_entry = channel_run[_cridx];
-                            const seg_loc: SegmentLocation = .{ .segment_no = self.current_segment, .file_offset = run_entry.file_offset, .frame_size = run_entry.frame_size };
-                            const msg = try self.read_dataset.fetchFromSegment(seg_loc, self.msg_buffer);
-                            if (msg) |_msg| {
-                                if (isSameOrAfterUlid(_msg.id(), self.first_ulid)) {
-                                    self.reached_first = true;
-                                    defer self.channel_run_idx = _cridx + 1;
-                                    return _msg;
-                                }
-                            } else {
-                                return IteratorError.EntryNotFound;
-                            }
-                        }
-                        // FIXME - remove dev tracing
-                        // self.logger.fine()
-                        //     .msg("First not reached in current segment")
-                        //     .intx("channel_id", self.channel_id)
-                        //     .int("current_segment", self.current_segment)
-                        //     .int("first_segment", self.first_segment)
-                        //     .int("final_segment", self.final_segment)
-                        //     .ulid("first_ulid", self.first_ulid)
-                        //     .ulid("final_ulid", self.final_ulid)
-                        //     .boolean("reached_end", self.reached_end)
-                        //     .log();
-                        // Reached end of channel run in current segment before reaching first ULID
-                        self.channel_run_idx = null;
-                        self.current_segment += 1;
-                        continue;
-                    }
-                } else if (self.current_segment == self.final_segment) {
-                    // FIXME - remove dev tracing
-                    // self.logger.fine()
-                    //     .msg("Reached end of channel run in final segment")
-                    //     .intx("channel_id", self.channel_id)
-                    //     .int("current_segment", self.current_segment)
-                    //     .int("first_segment", self.first_segment)
-                    //     .int("final_segment", self.final_segment)
-                    //     .ulid("first_ulid", self.first_ulid)
-                    //     .ulid("final_ulid", self.final_ulid)
-                    //     .boolean("reached_end", self.reached_end)
-                    //     .log();
-                    // Reached end of channel run in final segment
-                    self.channel_run_idx = null;
-                    self.reached_end = true;
-                    return null;
-                } else {
-                    // FIXME - remove dev tracing
-                    // self.logger.fine()
-                    //     .msg("Reached end of channel run in current segment")
-                    //     .intx("channel_id", self.channel_id)
-                    //     .int("current_segment", self.current_segment)
-                    //     .int("first_segment", self.first_segment)
-                    //     .int("final_segment", self.final_segment)
-                    //     .ulid("first_ulid", self.first_ulid)
-                    //     .ulid("final_ulid", self.final_ulid)
-                    //     .boolean("reached_end", self.reached_end)
-                    //     .log();
-                    // Reached end of channel run in current segment
-                    self.channel_run_idx = null;
-                    self.current_segment += 1;
+            // A closed segment: its channel index file says whether it holds the channel, where the range starts
+            // in it and where each frame is. A segment without the channel costs a lookup in memory.
+            if (read_dataset.channelDirectory(self.current_segment)) |directory| {
+                const dir_entry = directory.find(self.channel_id) orelse {
+                    self.nextSegment();
+                    continue;
+                };
+                if (isBeforeUlid(dir_entry.last_id, self.first_ulid)) {
+                    self.nextSegment();
                     continue;
                 }
-            } else {
-                self.logger.err()
-                    .msg("Uninitialized channel run index")
-                    .intx("channel_id", self.channel_id)
-                    .int("current_segment", self.current_segment)
-                    .int("first_segment", self.first_segment)
-                    .int("final_segment", self.final_segment)
-                    .ulid("first_ulid", self.first_ulid)
-                    .ulid("final_ulid", self.final_ulid)
-                    .boolean("reached_end", self.reached_end)
-                    .log();
-                return IteratorError.IllegalState;
+                if (isBeforeUlid(self.final_ulid, dir_entry.first_id)) {
+                    self.end();
+                    return null;
+                }
+
+                const light = try read_dataset.lightSegment(self.current_segment);
+                const pos = self.run_pos orelse found: {
+                    const start = if (isBeforeUlid(dir_entry.first_id, self.first_ulid))
+                        try ChannelIndexFile.lowerBound(light.chx_file, directory, dir_entry, self.first_ulid)
+                    else
+                        0;
+                    self.run_pos = start;
+                    break :found start;
+                };
+                if (pos >= dir_entry.run_len) {
+                    self.nextSegment();
+                    continue;
+                }
+
+                const run_entry = try self.runEntry(light, directory, dir_entry, pos);
+                if (isBeforeUlid(self.final_ulid, run_entry.id)) {
+                    self.end();
+                    return null;
+                }
+                const msg = readRunFrame(light, run_entry, self.channel_id, self.msg_buffer) catch |e| {
+                    // The file does not match its segment. Positions in a run are the same in the segment cache,
+                    // so the read goes on from here through it.
+                    self.logger.err()
+                        .msg("A segment's channel index does not match its message file; removing it")
+                        .err(e)
+                        .intx("channel_id", self.channel_id)
+                        .int("segment_no", self.current_segment)
+                        .int("run_pos", pos)
+                        .log();
+                    read_dataset.dropChannelDirectory(self.current_segment);
+                    self.chunk_segment = no_segment;
+                    continue;
+                };
+                self.run_pos = pos + 1;
+                return msg;
             }
+
+            // The segment being appended to (or one without a channel index file): through the segment cache
+            const dse = try read_dataset.acquireSegment(self.current_segment);
+            defer read_dataset.releaseSegment(dse);
+            const channel_run = dse.channel_index.lookup(self.channel_id) orelse {
+                // A segment without this channel is not the end: later segments may hold more of it.
+                self.nextSegment();
+                continue;
+            };
+            const pos = self.run_pos orelse found: {
+                const start = runLowerBound(dse, channel_run, self.first_ulid);
+                self.run_pos = start;
+                break :found start;
+            };
+            if (pos >= channel_run.len) {
+                self.nextSegment();
+                continue;
+            }
+
+            const run_entry = channel_run[@intCast(pos)];
+            const seg_loc: SegmentLocation = .{ .segment_no = self.current_segment, .file_offset = run_entry.file_offset, .frame_size = run_entry.frame_size };
+            const msg = try read_dataset.fetchFromSegment(seg_loc, self.msg_buffer) orelse return IteratorError.EntryNotFound;
+            if (!isSameOrBeforeUlid(msg.id(), self.final_ulid)) {
+                // Overshot final message
+                self.end();
+                return null;
+            }
+            self.run_pos = pos + 1;
+            return msg;
         }
     }
 
     pub fn rewind(self: *ChannelIterator) void {
         self.current_segment = self.first_segment;
-        self.reached_first = false;
         self.reached_end = false;
-        self.channel_run_idx = null;
+        self.run_pos = null;
+        self.chunk_segment = no_segment;
     }
 };
 
@@ -1554,4 +1680,134 @@ test "ReadDataset.ChannelIterator.bounds" {
             .log();
         try testing.expectEqual(5, actual_count);
     }
+}
+
+test "ReadDataset.ChannelIterator.channel index files" {
+    std.debug.print("test.ReadDataset.ChannelIterator.channel index files\n", .{});
+    const allocator = testing.allocator;
+    const out_buffer = try allocator.alloc(u8, 2048);
+    defer allocator.free(out_buffer);
+    var stderr_writer = std.fs.File.stderr().writer(out_buffer);
+
+    const prev_default_logging_filter_level = logging.default_logging_filter_level;
+    defer logging.default_logging_filter_level = prev_default_logging_filter_level;
+    logging.default_logging_filter_level = logging.LogLevel.none;
+
+    try logging.init(allocator, &stderr_writer);
+    defer logging.deinit();
+    var fah = FrameAllocator.init(allocator);
+    const frame_allocator = fah.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp_dir.cleanup();
+
+    // Two closed segments and a third being appended to. Three busy channels take turns; a rare channel has a
+    // message every 50,000, so each segment holds a few of it.
+    const number_of_messages: usize = 2 * limits.max_message_file_entries + 1000;
+    const rare_every: usize = 50_000;
+    const rare_channel: u128 = 99;
+    const absent_channel: u128 = 12345;
+    const ids = try allocator.alloc(Ulid, number_of_messages);
+    defer allocator.free(ids);
+    const channelOf = struct {
+        fn of(idx: usize) u128 {
+            return if (idx % rare_every == 7) rare_channel else idx % 3;
+        }
+    }.of;
+
+    {
+        const Dataset = @import("Dataset.zig");
+        var dataset = try Dataset.open(allocator, frame_allocator, std.time.nanoTimestamp(), .{ .dir = tmp_dir.dir });
+        defer dataset.close();
+
+        const message_frame: []u8 = try allocator.alloc(u8, 512);
+        defer allocator.free(message_frame);
+        var ulid_generator = common.ulid.generator();
+        for (0..number_of_messages) |idx| {
+            ids[idx] = try ulid_generator.next();
+            var test_msg = try Message.initOverlay(message_frame, idx, ids[idx], channelOf(idx), 101, "A" ** 64, .{});
+            _ = try dataset.store(&test_msg);
+        }
+        try dataset.sync();
+    }
+
+    var segments_ulid_idx = try SegmentsUlidIndex.init(allocator, 10);
+    defer segments_ulid_idx.deinit(allocator);
+    var read_dataset = try ReadDataset.open(allocator, frame_allocator, &segments_ulid_idx, .{ .dir = tmp_dir.dir });
+    defer read_dataset.close();
+    try testing.expectEqual(3, read_dataset.num_segments);
+
+    try read_dataset.prepareChannelIndex();
+    try read_dataset.populateSegmentsUlidIndex(&segments_ulid_idx);
+    // The closed segments have a channel index file and directory; the one being appended to has neither
+    try tmp_dir.dir.access("dymes_0.chx", .{});
+    try tmp_dir.dir.access("dymes_1.chx", .{});
+    try testing.expectError(error.FileNotFound, tmp_dir.dir.access("dymes_2.chx", .{}));
+    try testing.expect(read_dataset.channelDirectory(0) != null and read_dataset.channelDirectory(1) != null);
+    try testing.expect(read_dataset.channelDirectory(2) == null);
+    try testing.expect(read_dataset.channelDirectory(0).?.find(absent_channel) == null);
+    try testing.expectEqual(ids[0], read_dataset.channelDirectory(0).?.first_id);
+
+    const Check = struct {
+        /// Reads `channel` over ids[from..to] (both included) and expects exactly its messages there, in order.
+        fn range(rd: *ReadDataset, fa: std.mem.Allocator, all_ids: []const Ulid, channel: u128, from: usize, to: usize, of: *const fn (usize) u128) !void {
+            var it = try rd.channelIterator(channel, all_ids[from], all_ids[to], 0, rd.num_segments - 1);
+            defer it.close(fa);
+            for (from..to + 1) |idx| {
+                if (of(idx) != channel) continue;
+                const msg = try it.next() orelse return error.TestExpectedMessage;
+                try testing.expectEqual(all_ids[idx], msg.id());
+                try testing.expectEqual(channel, msg.frame_header.channel);
+            }
+            try testing.expectEqual(null, try it.next());
+        }
+    };
+    const last = number_of_messages - 1;
+    const seg = limits.max_message_file_entries;
+
+    // Whole store, across both closed segments and the open one
+    try Check.range(&read_dataset, frame_allocator, ids, 0, 0, last, channelOf);
+    try Check.range(&read_dataset, frame_allocator, ids, rare_channel, 0, last, channelOf);
+    // From the middle of a closed segment into the next, and into the open one
+    try Check.range(&read_dataset, frame_allocator, ids, 1, seg / 2, seg + 10, channelOf);
+    try Check.range(&read_dataset, frame_allocator, ids, 2, seg + seg / 2, last - 5, channelOf);
+    // Wholly inside one closed segment, and wholly inside the open one
+    try Check.range(&read_dataset, frame_allocator, ids, 0, 1000, 2000, channelOf);
+    try Check.range(&read_dataset, frame_allocator, ids, 1, last - 500, last - 100, channelOf);
+    // A range that holds none of the rare channel, and a channel the store does not hold
+    try Check.range(&read_dataset, frame_allocator, ids, rare_channel, 100, 40_000, channelOf);
+    try Check.range(&read_dataset, frame_allocator, ids, absent_channel, 0, last, channelOf);
+
+    // A channel index file that does not match its segment is dropped mid-read, and the read goes on
+    {
+        var chx = try tmp_dir.dir.openFile("dymes_1.chx", .{ .mode = .read_write });
+        defer chx.close();
+        const directory = read_dataset.channelDirectory(1).?;
+        const dir_entry = directory.find(1).?;
+        // Point the channel's 11th message in the segment somewhere else
+        var bad: ChannelIndexFile.RunEntry = undefined;
+        try testing.expectEqual(@sizeOf(ChannelIndexFile.RunEntry), try chx.preadAll(std.mem.asBytes(&bad), directory.runOffset(dir_entry, 10)));
+        bad.file_offset += 16;
+        try chx.pwriteAll(std.mem.asBytes(&bad), directory.runOffset(dir_entry, 10));
+    }
+    try Check.range(&read_dataset, frame_allocator, ids, 1, seg / 2, seg + seg / 2, channelOf);
+    try testing.expect(read_dataset.channelDirectory(1) == null);
+    try testing.expectError(error.FileNotFound, tmp_dir.dir.access("dymes_1.chx", .{}));
+
+    // The next time the store is opened the file is rebuilt; a truncated one is too
+    {
+        var chx = try tmp_dir.dir.openFile("dymes_0.chx", .{ .mode = .read_write });
+        defer chx.close();
+        try chx.setEndPos(1000);
+    }
+    try testing.expectEqual(null, try ChannelIndexFile.load(allocator, tmp_dir.dir, 0));
+    var reopened_ulid_idx = try SegmentsUlidIndex.init(allocator, 10);
+    defer reopened_ulid_idx.deinit(allocator);
+    var reopened = try ReadDataset.open(allocator, frame_allocator, &reopened_ulid_idx, .{ .dir = tmp_dir.dir });
+    defer reopened.close();
+    try reopened.prepareChannelIndex();
+    try reopened.populateSegmentsUlidIndex(&reopened_ulid_idx);
+    try testing.expect(reopened.channelDirectory(0) != null and reopened.channelDirectory(1) != null);
+    try Check.range(&reopened, frame_allocator, ids, 1, 0, last, channelOf);
+    try Check.range(&reopened, frame_allocator, ids, rare_channel, seg - 10, last, channelOf);
 }
