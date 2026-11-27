@@ -91,6 +91,7 @@ pub fn open(gpa: std.mem.Allocator, frame_allocator: std.mem.Allocator, options:
     });
     errdefer read_dataset.close();
 
+    try read_dataset.prepareChannelIndex();
     try read_dataset.populateSegmentsUlidIndex(&segments_ulid_idx);
 
     assert(@as(u128, @bitCast(read_dataset.first_ulid)) == @as(u128, @bitCast(segments_ulid_idx.entries.items[0].first_id)));
@@ -112,6 +113,7 @@ pub fn open(gpa: std.mem.Allocator, frame_allocator: std.mem.Allocator, options:
     // The read dataset was handed the stack copy of the segment index above; point it at the store's own copy,
     // which appends keep up to date, before the stack copy goes away.
     new_self.read_dataset.segments_ulid_idx = &new_self.segments_ulid_idx;
+    new_self.read_dataset.warmActiveSegment();
 
     const health_provider = ComponentHealthProvider.init(component_name, new_self, healthProbe);
 
@@ -255,6 +257,8 @@ pub fn appended(self: *Self, channel_id: u128, msg_location: MessageLocation, co
         defer self.read_dataset.releaseSegment(dse);
         const first_id = dse.message_index.entries[0].id;
         try self.segments_ulid_idx.update(msg_location.segment_no, first_id, msg_location.id);
+        // The segment before this one is closed now
+        if (msg_location.segment_no > 0) self.read_dataset.segmentClosed(msg_location.segment_no - 1);
     } else {
         try self.read_dataset.appended(channel_id, msg_location, corr_location);
     }
