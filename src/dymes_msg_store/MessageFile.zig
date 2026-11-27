@@ -697,7 +697,46 @@ pub const Iterator = struct {
     frame_buffer: []u8,
     reader_buffer: []u8,
     reader: std.fs.File.Reader,
-    message_file: *MessageFile,
+    message_file: ?*MessageFile,
+
+    /// Opens an iterator over a segment's message file by name, without an open `MessageFile`: a range read of a
+    /// closed segment needs the file, not the segment's index.
+    pub fn openInDir(frame_allocator: std.mem.Allocator, dir: std.fs.Dir, segment_no: u64, start_offset: u64) IteratorError!Iterator {
+        const logger = logging.logger("msg_store.MessageFile.Iterator");
+        const frame_buffer: []u8 = frame_allocator.alloc(u8, message_buffer_size) catch return AllocationError.OutOfMemory;
+        errdefer frame_allocator.free(frame_buffer);
+
+        const reader_buffer = frame_allocator.alloc(u8, iterator_read_buffer_size) catch return AllocationError.OutOfMemory;
+        errdefer frame_allocator.free(reader_buffer);
+
+        var name_buf: [64]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, msg_file_name_fmt, .{segment_no}) catch unreachable;
+        const iterator_file = dir.openFile(name, .{ .mode = .read_only }) catch return AccessError.AccessFailure;
+        errdefer iterator_file.close();
+
+        var reader = iterator_file.reader(reader_buffer);
+        reader.seekTo(start_offset) catch |e| {
+            logger.err()
+                .msg("Failed to seek to start of message file")
+                .err(e)
+                .int("segment_no", segment_no)
+                .int("start_offset", start_offset)
+                .log();
+            return AccessError.AccessFailure;
+        };
+
+        return .{
+            .logger = logger,
+            .pathname = "(message file of a closed segment)",
+            .file = iterator_file,
+            .frame_allocator = frame_allocator,
+            .read_offset = start_offset,
+            .frame_buffer = frame_buffer,
+            .reader_buffer = reader_buffer,
+            .reader = reader,
+            .message_file = null,
+        };
+    }
 
     pub fn open(message_file: *MessageFile, start_offset: u64) IteratorError!Iterator {
         const logger = logging.logger("msg_store.MessageFile.Iterator");

@@ -1079,11 +1079,35 @@ pub const RangeIterator = struct {
             }
 
             // No current segment, or non-final segment fully traversed
+            // A closed segment is read from its files: where the range starts in it comes from a binary search of
+            // its index file, and its messages from its message file. Loading the segment into the segment cache
+            // reads its whole index twice, and a range read does that for every segment it enters.
+            if (self.read_dataset.segmentClosedNow(self.current_segment)) {
+                const iterator_offset: u64 = if (self.current_segment == self.first_segment)
+                    try rangeStartOffset(self.read_dataset.dir, self.current_segment, self.first_ulid)
+                else
+                    @sizeOf(MessageFile.Header);
+                if (self.msg_file_it_) |*msg_file_it| {
+                    msg_file_it.close();
+                    self.msg_file_it_ = null;
+                }
+                self.msg_file_it_ = try MessageFile.Iterator.openInDir(self.read_dataset.frame_allocator, self.read_dataset.dir, self.current_segment, iterator_offset);
+                continue; // Now attempt fetch again
+            }
+
             const dse = try self.read_dataset.acquireSegment(self.current_segment);
             defer self.read_dataset.releaseSegment(dse);
 
             const iterator_offset: u64 = if (self.current_segment == self.first_segment) offset: {
-                break :offset if (dse.message_index.lookupClosest(self.first_ulid)) |mie| mie.msg_file_offset else @sizeOf(MessageFile.Header);
+                // The first message at or after the range's start; none means the range starts after this segment
+                const index_entries = dse.message_index.entries[0..dse.message_index.append_idx];
+                var low: usize = 0;
+                var high: usize = index_entries.len;
+                while (low < high) {
+                    const mid = (low + high) / 2;
+                    if (isBeforeUlid(index_entries[mid].id, self.first_ulid)) low = mid + 1 else high = mid;
+                }
+                break :offset if (low < index_entries.len) index_entries[low].msg_file_offset else dse.data_segment.message_file.append_offset;
             } else @sizeOf(MessageFile.Header);
 
             // self.logger.fine()
@@ -1252,6 +1276,51 @@ test "ReadDataset.RangeIterator" {
         }
         try testing.expectEqualSlices(Ulid, message_ids[900..1000], found_ids[0..100]);
     }
+}
+
+/// Offset in a closed segment's message file of its first message with id `first_ulid` or later (the end of the
+/// message file if it has none), by binary search of the segment's index file.
+fn rangeStartOffset(dir: std.fs.Dir, segment_no: u64, first_ulid: Ulid) (AccessError || StateError)!u64 {
+    const IndexFile = @import("IndexFile.zig");
+    const IndexEntry = @import("IndexEntry.zig");
+    var name_buf: [64]u8 = undefined;
+    const idx_name = std.fmt.bufPrint(&name_buf, IndexFile.idx_file_name_fmt, .{segment_no}) catch unreachable;
+    var idx_file = dir.openFile(idx_name, .{ .mode = .read_only }) catch return AccessError.AccessFailure;
+    defer idx_file.close();
+    const idx_size = (idx_file.stat() catch return AccessError.AccessFailure).size;
+    if (idx_size < @sizeOf(IndexFile.Header)) return StateError.DataTruncated;
+    const num_entries = (idx_size - @sizeOf(IndexFile.Header)) / IndexEntry.idx_entry_size;
+
+    var entry_buf: [IndexEntry.idx_entry_size]u8 align(16) = undefined;
+    var low: u64 = 0;
+    var high: u64 = num_entries;
+    var start_offset: ?u64 = null;
+    while (low < high) {
+        const mid = (low + high) / 2;
+        const read = idx_file.preadAll(&entry_buf, @sizeOf(IndexFile.Header) + mid * IndexEntry.idx_entry_size) catch return AccessError.AccessFailure;
+        if (read != entry_buf.len) return StateError.DataTruncated;
+        const idx_entry = IndexEntry.overlay(&entry_buf);
+        if (!idx_entry.verifyChecksum()) return StateError.ChecksumFailure;
+        if (isBeforeUlid(idx_entry.frame_header.id, first_ulid)) {
+            low = mid + 1;
+        } else {
+            high = mid;
+            start_offset = idx_entry.msg_file_offset;
+        }
+    }
+    if (start_offset) |offset| return offset;
+
+    // Every message of the segment is before the range's start
+    var msg_name_buf: [64]u8 = undefined;
+    const msg_name = std.fmt.bufPrint(&msg_name_buf, MessageFile.msg_file_name_fmt, .{segment_no}) catch unreachable;
+    return (dir.statFile(msg_name) catch return AccessError.AccessFailure).size;
+}
+
+/// Whether a later segment exists, so this one is no longer appended to.
+fn segmentClosedNow(self: *Self, segment_no: u64) bool {
+    self.mtx_dataset.lock();
+    defer self.mtx_dataset.unlock();
+    return segment_no + 1 < self.num_segments;
 }
 
 pub const ChannelIterator = struct {
@@ -1823,4 +1892,82 @@ test "ReadDataset.ChannelIterator.channel index files" {
     try testing.expect(reopened.channelDirectory(0) != null and reopened.channelDirectory(1) != null);
     try Check.range(&reopened, frame_allocator, ids, 1, 0, last, channelOf);
     try Check.range(&reopened, frame_allocator, ids, rare_channel, seg - 10, last, channelOf);
+}
+
+test "ReadDataset.RangeIterator.closed segments and range start" {
+    std.debug.print("test.ReadDataset.RangeIterator.closed segments and range start\n", .{});
+    const allocator = testing.allocator;
+    const out_buffer = try allocator.alloc(u8, 2048);
+    defer allocator.free(out_buffer);
+    var stderr_writer = std.fs.File.stderr().writer(out_buffer);
+
+    const prev_default_logging_filter_level = logging.default_logging_filter_level;
+    defer logging.default_logging_filter_level = prev_default_logging_filter_level;
+    logging.default_logging_filter_level = logging.LogLevel.none;
+
+    try logging.init(allocator, &stderr_writer);
+    defer logging.deinit();
+    var fah = FrameAllocator.init(allocator);
+    const frame_allocator = fah.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp_dir.cleanup();
+
+    // Two closed segments and a third being appended to. Ids are two milliseconds apart, so an id can fall
+    // between two messages.
+    const number_of_messages: usize = 2 * limits.max_message_file_entries + 1000;
+    const base_ms: u48 = 1_700_000_000_000;
+    const idOf = struct {
+        fn of(idx: usize) Ulid {
+            return .{ .time = base_ms + @as(u48, @intCast(idx)) * 2, .rand = 0 };
+        }
+    }.of;
+    {
+        const Dataset = @import("Dataset.zig");
+        var dataset = try Dataset.open(allocator, frame_allocator, std.time.nanoTimestamp(), .{ .dir = tmp_dir.dir });
+        defer dataset.close();
+        const message_frame: []u8 = try allocator.alloc(u8, 512);
+        defer allocator.free(message_frame);
+        for (0..number_of_messages) |idx| {
+            var test_msg = try Message.initOverlay(message_frame, idx, idOf(idx), idx % 5, 101, "A" ** 64, .{});
+            _ = try dataset.store(&test_msg);
+        }
+        try dataset.sync();
+    }
+
+    var segments_ulid_idx = try SegmentsUlidIndex.init(allocator, 10);
+    defer segments_ulid_idx.deinit(allocator);
+    var read_dataset = try ReadDataset.open(allocator, frame_allocator, &segments_ulid_idx, .{ .dir = tmp_dir.dir });
+    defer read_dataset.close();
+    try read_dataset.populateSegmentsUlidIndex(&segments_ulid_idx);
+    try testing.expectEqual(3, read_dataset.num_segments);
+
+    const seg = limits.max_message_file_entries;
+    const Case = struct { from: usize, between: bool, to: usize };
+    const cases = [_]Case{
+        // From the middle of a closed segment into the next
+        .{ .from = seg / 2, .between = false, .to = seg + 10 },
+        // The range starts between two messages: the earlier one is not part of it
+        .{ .from = seg / 2, .between = true, .to = seg / 2 + 100 },
+        .{ .from = seg + 7, .between = true, .to = 2 * seg + 500 },
+        // Inside the segment being appended to
+        .{ .from = 2 * seg + 100, .between = true, .to = 2 * seg + 900 },
+        // The whole store
+        .{ .from = 0, .between = false, .to = number_of_messages - 1 },
+    };
+    for (cases) |case| {
+        var first_ulid = idOf(case.from);
+        if (case.between) first_ulid.time += 1;
+        const first_expected = if (case.between) case.from + 1 else case.from;
+        const first_segment = segments_ulid_idx.lookup(idOf(first_expected)).?;
+        const final_segment = segments_ulid_idx.lookup(idOf(case.to)).?;
+
+        var it = read_dataset.rangeIterator(first_ulid, idOf(case.to), first_segment, final_segment);
+        defer it.close();
+        for (first_expected..case.to + 1) |idx| {
+            const msg = try it.next() orelse return error.TestExpectedMessage;
+            try testing.expectEqual(idOf(idx), msg.id());
+        }
+        try testing.expectEqual(null, try it.next());
+    }
 }
