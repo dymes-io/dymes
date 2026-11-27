@@ -74,8 +74,17 @@ pub fn deinit(self: *Self) void {
         .msg("Stopping storage subsystem")
         .log();
     defer self.allocator.destroy(self);
+    // A write that failed (a full volume) can leave bytes past the journal's ends. The journal is what the next start
+    // trims them by, as after a crash: without it the store needs manual repair.
+    const keep_journal = self.append_store.needsRepair();
     self.append_store.close();
-    AppendStore.cleanup(self.logger, self.dir);
+    if (keep_journal) {
+        self.logger.warn()
+            .msg("Message store stopped after a failed write; its journal is kept for the next start to repair by")
+            .log();
+    } else {
+        AppendStore.cleanup(self.logger, self.dir);
+    }
     defer self.logger.debug()
         .msg("Storage subsystem stopped")
         .log();
@@ -128,4 +137,66 @@ fn openAppendStore(logger: *logging.Logger, allocator: std.mem.Allocator, frame_
     }
 
     return AppendStore.open(allocator, frame_allocator, store_options);
+}
+
+const testing = std.testing;
+
+test "StorageSubsystem.stop after a failed write keeps the journal" {
+    std.debug.print("test.StorageSubsystem.failed_write_stop\n", .{});
+    const allocator = testing.allocator;
+    const out_buffer = try allocator.alloc(u8, 2048);
+    defer allocator.free(out_buffer);
+    var stderr_writer = std.fs.File.stderr().writer(out_buffer);
+    const prev_default_logging_filter_level = logging.default_logging_filter_level;
+    defer logging.default_logging_filter_level = prev_default_logging_filter_level;
+    logging.default_logging_filter_level = logging.LogLevel.none;
+    try logging.init(allocator, &stderr_writer);
+    defer logging.deinit();
+    var fah = @import("dymes_msg").FrameAllocator.init(allocator);
+    const frame_allocator = fah.allocator();
+
+    var tmp_dir = testing.tmpDir(.{ .iterate = true });
+    defer tmp_dir.cleanup();
+    var health_monitor = common.health.Health.init(allocator);
+    defer health_monitor.deinit();
+    var options = try MessageStoreOptions.init(allocator, tmp_dir.dir, "dummy", &health_monitor);
+    defer options.deinit(allocator);
+
+    var ulid_generator = common.ulid.generator();
+    const message_frame: []u8 = try allocator.alloc(u8, 1024);
+    defer allocator.free(message_frame);
+
+    var msg_eof: u64 = 0;
+    {
+        var storage = try init(allocator, frame_allocator, options, true);
+        for (0..20) |idx| {
+            var test_msg = try Message.initOverlay(message_frame, idx, try ulid_generator.next(), idx, 101, "a body long enough that the message file outgrows the index file, as it does in use", .{});
+            _ = try storage.store(&test_msg);
+        }
+        try storage.sync();
+        const msg_file = try tmp_dir.dir.openFile("dymes_0.msg", .{ .mode = .read_write });
+        defer msg_file.close();
+        msg_eof = try msg_file.getEndPos();
+        // The volume fills: a message reaches the message file, its index entry does not, and the store stops taking writes
+        try msg_file.seekFromEnd(0);
+        try msg_file.writeAll(&([_]u8{0xA5} ** 656));
+        storage.append_store.dataset.status.repair_state = .needs_repair;
+        try testing.expect(!storage.ready());
+        storage.deinit();
+    }
+
+    // The next start trims the message file to the journal and takes writes again
+    var storage = try init(allocator, frame_allocator, options, false);
+    {
+        const msg_file = try tmp_dir.dir.openFile("dymes_0.msg", .{});
+        defer msg_file.close();
+        try testing.expectEqual(msg_eof, try msg_file.getEndPos());
+    }
+    try testing.expect(storage.ready());
+    var test_msg = try Message.initOverlay(message_frame, 20, try ulid_generator.next(), 20, 101, "after the repair", .{});
+    _ = try storage.store(&test_msg);
+    storage.deinit();
+
+    // A store that stopped healthy leaves no journal behind
+    try testing.expectError(error.FileNotFound, tmp_dir.dir.access(msg_store.constants.hot_journal_file_name, .{}));
 }
