@@ -65,18 +65,29 @@ four CPUs.
 | `rollover` | Appends 300,000 messages on two channels, so the node rolls over to a new segment while serving, then reads both channels and a generated one. | Every message once, in order. |
 | `cursor-leak` | Opens 32 cursors, reads a batch from each and goes away without closing them. | No cursor is open once the idle limit has passed. |
 | `abandoned-traversal` | Four clients each open a filtered read of the whole store that matches nothing, hang up 200 ms into the fetch and close the cursor from another connection. | A new client is answered promptly once they stop. |
+| `hung-up-traversal` | The same, but the clients hang up and never close their cursors. | The same: the node stops reading for a client that has gone. |
 
 ## Faults
 
 ```sh
-scripts/bench/run.sh /data/bench/small /data/bench/small.json results crash
+scripts/bench/run.sh /data/bench/small /data/bench/small.json results crash disk-full restart
 ```
 
-`crash` kills the node with `SIGKILL` while four clients append (two a message at a time, two in
-batches) and another reads a large channel, restarts it on the same store, and checks that every
-append the node acknowledged is there, once and in order, that the node appends again and that a
-generated channel reads as before. It does this `CRASH_ROUNDS` times (3), each check covering every
-round so far. Native node only.
+These stop, starve or restart the node themselves, so they run a native node only.
+
+| Scenario | What it does | What a fit node shows |
+| --- | --- | --- |
+| `crash` | Kills the node with `SIGKILL` while four clients append (two a message at a time, two in batches) and another reads a large channel, and restarts it on the same store. `CRASH_ROUNDS` times (3), each check covering every round so far. | Every append the node acknowledged is there, once and in order; the node appends again; a generated channel reads as before. |
+| `disk-full` | Fills the store's volume while the same clients append, frees the space, then stops and starts the node. | With the volume full the node refuses appends, says it is not ready and still serves reads. Started again with space, it has every append it acknowledged and appends again. |
+| `restart` | Stops the node with `SIGTERM` while eight part-read cursors are open and four clients each have a long fetch in flight, and starts it again. | The node stops within 10 s, and afterwards refuses the old cursors. |
+
+`disk-full` needs a volume about 400 MB larger than the store. On macOS it makes a disk image and
+removes it afterwards; elsewhere give it an empty directory on such a volume in `BENCH_SMALL_FS`,
+for example `sudo mount -t tmpfs -o size=2100m tmpfs /mnt/small` for the 1.6 GiB store.
+
+`append-storm` is an ordinary scenario that looks for a fault: sixteen clients append one small
+message at a time over kept-alive connections for `--seconds`, and check every byte of every
+response (the status line, the length, a message id and nothing after it).
 
 Every scenario prints `"ok"`: whether the node met what the scenario checks. Options:
 `--repeat` (reads per case), `--max-messages` (where a read of a large channel stops),

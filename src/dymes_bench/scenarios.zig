@@ -30,7 +30,8 @@ pub const Options = struct {
     seconds: u64 = 10,
     /// The node's metrics endpoint
     metrics_url: []const u8 = "http://127.0.0.1:6502/observe/metrics",
-    /// Where `crash-load` records what the node acknowledged, for `crash-verify`
+    /// Where `crash-load` records what the node acknowledged, for `crash-verify`, and where
+    /// `cursors-hold` records the cursors it left open, for `cursors-after`
     state: []const u8 = "",
 };
 
@@ -160,12 +161,22 @@ pub fn run(allocator: Allocator, options: Options) !void {
         try crashLoad(allocator, options, manifest, &out);
     } else if (std.mem.eql(u8, options.scenario, "crash-verify")) {
         try crashVerify(allocator, options, manifest, &out);
+    } else if (std.mem.eql(u8, options.scenario, "disk-full-check")) {
+        try diskFullCheck(allocator, options, manifest, &out);
+    } else if (std.mem.eql(u8, options.scenario, "cursors-hold")) {
+        try cursorsHold(allocator, options, manifest, &out);
+    } else if (std.mem.eql(u8, options.scenario, "cursors-after")) {
+        try cursorsAfter(allocator, options, manifest, &out);
+    } else if (std.mem.eql(u8, options.scenario, "append-storm")) {
+        try appendStorm(allocator, options, &out);
     } else if (std.mem.eql(u8, options.scenario, "rollover")) {
         try rollover(allocator, options, manifest, &out);
     } else if (std.mem.eql(u8, options.scenario, "cursor-leak")) {
         try cursorLeak(allocator, options, manifest, &out);
     } else if (std.mem.eql(u8, options.scenario, "abandoned-traversal")) {
-        try abandonedTraversal(allocator, options, manifest, &out);
+        try abandonedTraversal(allocator, options, true, &out);
+    } else if (std.mem.eql(u8, options.scenario, "hung-up-traversal")) {
+        try abandonedTraversal(allocator, options, false, &out);
     } else if (std.mem.eql(u8, options.scenario, "mixed-load")) {
         try mixedLoad(allocator, options, manifest, &out);
     } else return error.UnknownScenario;
@@ -430,11 +441,14 @@ fn cursorLeak(allocator: Allocator, options: Options, manifest: Manifest, out: *
 const Abandoner = struct {
     allocator: Allocator,
     url: []const u8,
+    /// Whether the client closes its cursor after hanging up, or just goes away
+    closes: bool = true,
     stop: std.atomic.Value(bool) = .init(false),
     rounds: std.atomic.Value(u64) = .init(0),
 
     /// Opens a filtered read of the whole store that matches nothing, starts a fetch, hangs up
-    /// and closes the cursor from another connection while the node is still traversing.
+    /// and (if it `closes`) closes the cursor from another connection while the node is still
+    /// traversing.
     fn loop(self: *Abandoner) void {
         var http: std.http.Client = .{ .allocator = self.allocator };
         defer http.deinit();
@@ -450,24 +464,24 @@ const Abandoner = struct {
                 continue;
             };
             fetchAndHangUp(self.allocator, self.url, cursor_id, 200) catch {};
-            deleteRawCursor(self.allocator, &http, self.url, cursor_id);
+            if (self.closes) deleteRawCursor(self.allocator, &http, self.url, cursor_id);
             _ = self.rounds.fetchAdd(1, .monotonic);
         }
     }
 };
 
 /// Clients that time out on a long filtered read and close its cursor while the node is still
-/// traversing. Once they stop, the node should answer a new client promptly; a node still
+/// traversing (`abandoned-traversal`), or hang up and leave the cursor (`hung-up-traversal`). Once
+/// they stop, the node should answer a new client promptly; a node still
 /// traversing for clients that have gone does not.
-fn abandonedTraversal(allocator: Allocator, options: Options, manifest: Manifest, out: *Out) !void {
-    _ = manifest;
+fn abandonedTraversal(allocator: Allocator, options: Options, closes: bool, out: *Out) !void {
     const before = probeAppend(allocator, options.url) orelse -1;
 
     const clients = 4;
     var abandoners: [clients]Abandoner = undefined;
     var threads: [clients]std.Thread = undefined;
     for (&abandoners, &threads) |*abandoner, *thread| {
-        abandoner.* = .{ .allocator = allocator, .url = options.url };
+        abandoner.* = .{ .allocator = allocator, .url = options.url, .closes = closes };
         thread.* = try std.Thread.spawn(.{}, Abandoner.loop, .{abandoner});
     }
     std.Thread.sleep(options.seconds * std.time.ns_per_s);
@@ -480,8 +494,8 @@ fn abandonedTraversal(allocator: Allocator, options: Options, manifest: Manifest
     const after = probeAppend(allocator, options.url) orelse -1;
     const recovered_s = probe_timer.read() / std.time.ns_per_s;
     const open_cursors = metric(allocator, options.metrics_url, "http_cursors_open") orelse -1;
-    try out.line("{{\"scenario\":\"abandoned-traversal\",\"clients\":{d},\"load_s\":{d},\"rounds\":{d},\"probe_before_ms\":{d:.1},\"probe_after_ms\":{d:.1},\"answered_after_s\":{d},\"open_cursors_after\":{d},\"ok\":{}}}", .{
-        clients, options.seconds, rounds, before, after, recovered_s, open_cursors, after >= 0 and after < 1000,
+    try out.line("{{\"scenario\":\"{s}\",\"clients\":{d},\"load_s\":{d},\"rounds\":{d},\"probe_before_ms\":{d:.1},\"probe_after_ms\":{d:.1},\"answered_after_s\":{d},\"open_cursors_after\":{d},\"ok\":{}}}", .{
+        options.scenario, clients, options.seconds, rounds, before, after, recovered_s, open_cursors, after >= 0 and after < 1000,
     });
     for (&threads) |*thread| thread.join();
 }
@@ -800,5 +814,250 @@ fn crashVerify(allocator: Allocator, options: Options, manifest: Manifest, out: 
     try out.line("{{\"scenario\":\"crash-verify\",\"acknowledged\":{d},\"missing\":{d},\"out_of_order\":{d},\"stored_unacknowledged\":{d},\"appends_again\":{},\"generated_channel\":{d},\"generated_channel_expected\":{d},\"ok\":{}}}", .{
         acknowledged,                                                                                                     missing, out_of_order, unacknowledged, appends_again, mid.messages, picks.mid.messages,
         acknowledged > 0 and missing == 0 and out_of_order == 0 and appends_again and mid.messages == picks.mid.messages,
+    });
+}
+
+/// The status of a GET, or null if the node does not answer.
+fn getStatus(allocator: Allocator, url: []const u8) ?std.http.Status {
+    var http: std.http.Client = .{ .allocator = allocator };
+    defer http.deinit();
+    var body: [16 * 1024]u8 = undefined;
+    var response_writer = std.Io.Writer.fixed(&body);
+    const result = http.fetch(.{ .method = .GET, .location = .{ .url = url }, .response_writer = &response_writer }) catch return null;
+    return result.status;
+}
+
+/// With the store's disk full (the caller filled it, and `crash-load` appended until the node
+/// refused): the node still answers, says it is not ready, still serves a generated channel
+/// whole, and refuses an append rather than acknowledging one it could not store.
+fn diskFullCheck(allocator: Allocator, options: Options, manifest: Manifest, out: *Out) !void {
+    const ready_url = try std.fmt.allocPrint(allocator, "{s}/observe/health/ready", .{options.url});
+    defer allocator.free(ready_url);
+    const ready_status = getStatus(allocator, ready_url);
+    const answers = ready_status != null;
+    const says_not_ready = ready_status == .service_unavailable;
+    const picks = try pick(manifest);
+    var read: i64 = -1;
+    if (answers) {
+        var client = try Client.init(allocator, options.url);
+        defer client.deinit();
+        const from = ulid_min.encode();
+        const to = ulid_max.encode();
+        if (readAll(&client, channelQuery(try picks.mid.channelId(), &from, &to, &.{}), std.math.maxInt(u64))) |result| {
+            read = @intCast(result.messages);
+        } else |_| {}
+    }
+    const append_refused = probeAppend(allocator, options.url) == null;
+    try out.line("{{\"scenario\":\"disk-full-check\",\"node_answers\":{},\"says_not_ready\":{},\"generated_channel\":{d},\"generated_channel_expected\":{d},\"append_refused\":{},\"ok\":{}}}", .{
+        answers, says_not_ready, read, picks.mid.messages, append_refused, answers and says_not_ready and read == @as(i64, @intCast(picks.mid.messages)) and append_refused,
+    });
+}
+
+const CursorHolder = struct {
+    allocator: Allocator,
+    url: []const u8,
+    last_cursor: u64 = 0,
+    opened: u64 = 0,
+
+    /// Opens a filtered read of the whole store that matches nothing and fetches from it, again
+    /// and again until the node goes away: a fetch is in flight when the node is stopped.
+    fn loop(self: *CursorHolder) void {
+        var http: std.http.Client = .{ .allocator = self.allocator };
+        defer http.deinit();
+        const from = ulid_min.encode();
+        const to = ulid_max.encode();
+        const filters = [_]FilterDto{.{ .kv_filter = .{ .eql = .{ .key = "tracking_id", .value = "no-such-run" } } }};
+        while (true) {
+            const cursor_id = openRawCursor(self.allocator, &http, self.url, .{
+                .query_dto = .{ .query_range = .{ .range_start = &from, .range_end = &to } },
+                .filters = &filters,
+            }) catch return;
+            self.last_cursor = cursor_id;
+            self.opened += 1;
+            const url = std.fmt.allocPrint(self.allocator, "{s}/api/v1/cursors/0x{x}?batch_size=0x1f", .{ self.url, cursor_id }) catch return;
+            defer self.allocator.free(url);
+            var body: [64 * 1024]u8 = undefined;
+            var response_writer = std.Io.Writer.fixed(&body);
+            _ = http.fetch(.{ .method = .GET, .location = .{ .url = url }, .response_writer = &response_writer }) catch return;
+        }
+    }
+};
+
+const cursor_holders = 4;
+const idle_cursors = 8;
+
+/// Leaves cursors open for the caller to stop the node under: eight part-read channel cursors
+/// nobody is fetching from, and four clients with a long fetch in flight. Returns when the node
+/// has gone, and records the cursor ids in `--state` for `cursors-after`.
+fn cursorsHold(allocator: Allocator, options: Options, manifest: Manifest, out: *Out) !void {
+    if (options.state.len == 0) return error.StateFileRequired;
+    const from = ulid_min.encode();
+    const to = ulid_max.encode();
+    var idle: [idle_cursors]u64 = undefined;
+    {
+        var http: std.http.Client = .{ .allocator = allocator };
+        defer http.deinit();
+        const big = try manifest.channels[0].channelId();
+        for (&idle) |*cursor_id| {
+            cursor_id.* = try openRawCursor(allocator, &http, options.url, channelQuery(big, &from, &to, &.{}));
+            fetchAndHangUp(allocator, options.url, cursor_id.*, 50) catch {};
+        }
+    }
+    var holders: [cursor_holders]CursorHolder = undefined;
+    var threads: [cursor_holders]std.Thread = undefined;
+    for (&holders, &threads) |*holder, *thread| {
+        holder.* = .{ .allocator = allocator, .url = options.url };
+        thread.* = try std.Thread.spawn(.{}, CursorHolder.loop, .{holder});
+    }
+    for (&threads) |*thread| thread.join();
+
+    var file = try std.fs.cwd().createFile(options.state, .{});
+    defer file.close();
+    var buf: [4096]u8 = undefined;
+    var file_writer = file.writer(&buf);
+    var opened: u64 = idle_cursors;
+    for (idle) |cursor_id| try file_writer.interface.print("{x}\n", .{cursor_id});
+    for (&holders) |*holder| {
+        opened += holder.opened;
+        if (holder.opened > 0) try file_writer.interface.print("{x}\n", .{holder.last_cursor});
+    }
+    try file_writer.interface.flush();
+    try out.line("{{\"scenario\":\"cursors-hold\",\"idle_cursors\":{d},\"fetching_clients\":{d},\"cursors_opened\":{d}}}", .{ idle_cursors, cursor_holders, opened });
+}
+
+/// After the node was stopped with cursors open and started again: a fetch from one of the old
+/// cursors is refused as a client error, the node appends, and a generated channel reads as it did.
+fn cursorsAfter(allocator: Allocator, options: Options, manifest: Manifest, out: *Out) !void {
+    if (options.state.len == 0) return error.StateFileRequired;
+    const text = try std.fs.cwd().readFileAlloc(allocator, options.state, 1024 * 1024);
+    defer allocator.free(text);
+    var old: u64 = 0;
+    var refused: u64 = 0;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |cursor_text| {
+        const url = try std.fmt.allocPrint(allocator, "{s}/api/v1/cursors/0x{s}?batch_size=0x1f", .{ options.url, cursor_text });
+        defer allocator.free(url);
+        old += 1;
+        if (getStatus(allocator, url)) |status| {
+            if (status.class() == .client_error) refused += 1;
+        }
+    }
+    const appends_again = probeAppend(allocator, options.url) != null;
+    const picks = try pick(manifest);
+    var client = try Client.init(allocator, options.url);
+    defer client.deinit();
+    const from = ulid_min.encode();
+    const to = ulid_max.encode();
+    const mid = try readAll(&client, channelQuery(try picks.mid.channelId(), &from, &to, &.{}), std.math.maxInt(u64));
+    try out.line("{{\"scenario\":\"cursors-after\",\"old_cursors\":{d},\"refused\":{d},\"appends_again\":{},\"generated_channel\":{d},\"generated_channel_expected\":{d},\"ok\":{}}}", .{
+        old,                                                                                 refused, appends_again, mid.messages, picks.mid.messages,
+        old > 0 and refused == old and appends_again and mid.messages == picks.mid.messages,
+    });
+}
+
+const Stormer = struct {
+    allocator: Allocator,
+    url: []const u8,
+    channel: u128,
+    stop: *std.atomic.Value(bool),
+    appended: u64 = 0,
+    garbled: u64 = 0,
+    reconnects: u64 = 0,
+
+    fn connect(self: *Stormer) !std.net.Stream {
+        const uri = try std.Uri.parse(self.url);
+        var host_buf: [std.Uri.host_name_max]u8 = undefined;
+        const host = try uri.getHost(&host_buf);
+        return std.net.tcpConnectToHost(self.allocator, host, uri.port orelse 80);
+    }
+
+    /// Reads exactly one response and checks every byte the node is known to send: the status
+    /// line, a content length, and a body of that length holding a message id.
+    fn readResponse(stream: std.net.Stream, buf: []u8) !usize {
+        var have: usize = 0;
+        var head_end: ?usize = null;
+        while (head_end == null) {
+            if (have == buf.len) return error.Garbled;
+            const got = try std.posix.read(stream.handle, buf[have..]);
+            if (got == 0) return error.Closed;
+            have += got;
+            if (std.mem.indexOf(u8, buf[0..have], "\r\n\r\n")) |at| head_end = at + 4;
+        }
+        const head = buf[0..head_end.?];
+        if (!std.mem.startsWith(u8, head, "HTTP/1.1 201 ")) return error.Garbled;
+        const marker = "Content-Length: ";
+        const at = std.mem.indexOf(u8, head, marker) orelse return error.Garbled;
+        const end = std.mem.indexOfPos(u8, head, at, "\r\n") orelse return error.Garbled;
+        const length = std.fmt.parseUnsigned(usize, head[at + marker.len .. end], 10) catch return error.Garbled;
+        while (have < head.len + length) {
+            const got = try std.posix.read(stream.handle, buf[have..]);
+            if (got == 0) return error.Closed;
+            have += got;
+        }
+        // Nothing may follow: the client sent one request
+        if (have != head.len + length or length != 26) return error.Garbled;
+        _ = common.ulid.decode(buf[head.len..have]) catch return error.Garbled;
+        return have;
+    }
+
+    fn loop(self: *Stormer) void {
+        var request_buf: [512]u8 = undefined;
+        const body = std.fmt.bufPrint(request_buf[256..], "{{\"encoded_correlation_id\":null,\"channel\":{d},\"routing\":1,\"kv_entries\":[],\"encoded_msg_body\":\"c3Rvcm0=\"}}", .{self.channel}) catch return;
+        const head = std.fmt.bufPrint(request_buf[0..256], "POST /api/v1/messages HTTP/1.1\r\nHost: dymes\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n\r\n", .{body.len}) catch return;
+        var response_buf: [4096]u8 = undefined;
+        var maybe_stream: ?std.net.Stream = null;
+        defer if (maybe_stream) |stream| stream.close();
+        while (!self.stop.load(.monotonic)) {
+            const stream = maybe_stream orelse blk: {
+                const fresh = self.connect() catch {
+                    std.Thread.sleep(100 * std.time.ns_per_ms);
+                    continue;
+                };
+                self.reconnects += 1;
+                maybe_stream = fresh;
+                break :blk fresh;
+            };
+            const iov = [_]std.posix.iovec_const{ .{ .base = head.ptr, .len = head.len }, .{ .base = body.ptr, .len = body.len } };
+            const sent = std.posix.writev(stream.handle, &iov) catch 0;
+            const ok = sent == head.len + body.len;
+            if (ok) {
+                if (readResponse(stream, &response_buf)) |_| {
+                    self.appended += 1;
+                    continue;
+                } else |e| if (e == error.Garbled) {
+                    self.garbled += 1;
+                    std.debug.print("garbled response on channel {d}: {x}\n", .{ self.channel, response_buf[0..64] });
+                }
+            }
+            stream.close();
+            maybe_stream = null;
+        }
+    }
+};
+
+/// Sixteen clients each append one small message at a time over a kept-alive connection, as fast
+/// as the node answers, and check every byte of every response.
+fn appendStorm(allocator: Allocator, options: Options, out: *Out) !void {
+    const clients = 16;
+    var stop: std.atomic.Value(bool) = .init(false);
+    var stormers: [clients]Stormer = undefined;
+    var threads: [clients]std.Thread = undefined;
+    for (&stormers, &threads, 0..) |*stormer, *thread, i| {
+        stormer.* = .{ .allocator = allocator, .url = options.url, .channel = scratch_channel + 64 + i, .stop = &stop };
+        thread.* = try std.Thread.spawn(.{}, Stormer.loop, .{stormer});
+    }
+    std.Thread.sleep(options.seconds * std.time.ns_per_s);
+    stop.store(true, .monotonic);
+    for (&threads) |*thread| thread.join();
+    var appended: u64 = 0;
+    var garbled: u64 = 0;
+    var reconnects: u64 = 0;
+    for (&stormers) |*stormer| {
+        appended += stormer.appended;
+        garbled += stormer.garbled;
+        reconnects += stormer.reconnects;
+    }
+    try out.line("{{\"scenario\":\"append-storm\",\"clients\":{d},\"seconds\":{d},\"appended\":{d},\"garbled_responses\":{d},\"connections\":{d},\"ok\":{}}}", .{
+        clients, options.seconds, appended, garbled, reconnects, appended > 0 and garbled == 0 and reconnects == clients,
     });
 }
