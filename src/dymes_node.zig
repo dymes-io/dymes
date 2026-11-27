@@ -164,6 +164,10 @@ pub fn main() !void {
                         .metrics = http_metrics,
                         .request_address = try http_config.asString("host") orelse unreachable,
                         .request_port = @intCast(try http_config.asInt("port") orelse unreachable),
+                        .cursor_idle_timeout_ms = if (try http_config.asInt("cursor_idle_timeout_s")) |seconds|
+                            @as(i64, @intCast(seconds)) * std.time.ms_per_s
+                        else
+                            dymes_http.constants.default_cursor_idle_timeout_ms,
                     });
                     defer server.deinit();
 

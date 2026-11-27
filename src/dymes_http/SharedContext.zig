@@ -35,6 +35,7 @@ const QueryCursor = dymes_msg_store.QueryCursor;
 const component_name = "http.SharedContext";
 
 const RequestContext = @import("RequestContext.zig");
+const constants = @import("constants.zig");
 
 const Ingester = @import("ingest.zig").Ingester;
 
@@ -43,6 +44,8 @@ const Self = @This();
 pub const Options = struct {
     ns_ts_supplier: *const fn () i128 = std.time.nanoTimestamp,
     ms_ts_supplier: *const fn () i64 = std.time.milliTimestamp,
+    /// A cursor no request has used for this long is closed; 0 keeps cursors until they are closed
+    cursor_idle_timeout_ms: i64 = constants.default_cursor_idle_timeout_ms,
 };
 
 allocator: Allocator,
@@ -65,6 +68,13 @@ query_cursors_mtx: std.Thread.Mutex = .{},
 cursor_users: std.AutoHashMap(u64, u32),
 /// Cursors closed while in use, closed by their last user.
 cursors_closing: std.AutoHashMap(u64, void),
+/// When each cursor was opened or last borrowed, in ms
+cursor_last_used: std.AutoHashMap(u64, i64),
+milliTimestamp: *const fn () i64,
+cursor_idle_timeout_ms: i64,
+/// Closes idle cursors; woken early to stop
+reaper: ?std.Thread = null,
+reaper_stop: std.Thread.ResetEvent = .{},
 
 pub fn init(allocator: Allocator, metrics: *HttpMetrics, health: *Health, engine: *Engine, ingester: *Ingester, options: Options) CreationError!*Self {
     const logger = common.logging.logger(component_name);
@@ -77,6 +87,8 @@ pub fn init(allocator: Allocator, metrics: *HttpMetrics, health: *Health, engine
     errdefer cursor_users.deinit();
     var cursors_closing = std.AutoHashMap(u64, void).init(allocator);
     errdefer cursors_closing.deinit();
+    var cursor_last_used = std.AutoHashMap(u64, i64).init(allocator);
+    errdefer cursor_last_used.deinit();
 
     var prng_fast = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
@@ -102,16 +114,33 @@ pub fn init(allocator: Allocator, metrics: *HttpMetrics, health: *Health, engine
         .cursors_closing = cursors_closing,
         .nanoTimestamp = options.ns_ts_supplier,
         .prng = prng_fast.random(),
+        .cursor_last_used = cursor_last_used,
+        .milliTimestamp = options.ms_ts_supplier,
+        .cursor_idle_timeout_ms = options.cursor_idle_timeout_ms,
     };
+    if (options.cursor_idle_timeout_ms > 0) {
+        new_self.reaper = std.Thread.spawn(.{}, reapIdleCursors, .{new_self}) catch |e| {
+            logger.err()
+                .msg("Failed to start the idle cursor reaper")
+                .err(e)
+                .log();
+            return CreationError.OtherCreationFailure;
+        };
+    }
     return new_self;
 }
 
 pub fn deinit(self: *Self) void {
     defer self.allocator.destroy(self);
+    if (self.reaper) |reaper| {
+        self.reaper_stop.set();
+        reaper.join();
+    }
     {
         self.query_cursors_mtx.lock();
         defer self.query_cursors_mtx.unlock();
         defer self.query_cursors.deinit();
+        defer self.cursor_last_used.deinit();
         defer self.cursor_users.deinit();
         defer self.cursors_closing.deinit();
         var it = self.query_cursors.iterator();
@@ -161,6 +190,8 @@ pub fn acquiredCursor(self: *Self, query_cursor: *QueryCursor) AllocationError!u
     assert(!self.query_cursors.contains(cursor_id));
 
     self.query_cursors.put(cursor_id, query_cursor) catch return AllocationError.OutOfMemory;
+    self.cursor_last_used.put(cursor_id, self.milliTimestamp()) catch {};
+    self.metrics.http_cursors_open.increment();
     self.logger.fine()
         .msg("Query cursor acquired")
         .intx("cursor_id", cursor_id)
@@ -191,8 +222,10 @@ pub fn releaseCursor(self: *Self, cursor_id: u64) void {
 /// Removes and closes the cursor; the caller holds query_cursors_mtx.
 fn closeCursorLocked(self: *Self, cursor_id: u64) void {
     _ = self.cursors_closing.remove(cursor_id);
+    _ = self.cursor_last_used.remove(cursor_id);
     if (self.query_cursors.fetchRemove(cursor_id)) |_entry| {
         _entry.value.close();
+        self.metrics.http_cursors_open.decrement();
         self.logger.fine()
             .msg("Query cursor released")
             .intx("cursor_id", cursor_id)
@@ -203,6 +236,50 @@ fn closeCursorLocked(self: *Self, cursor_id: u64) void {
             .msg("Ignored attempt to release unknown cursor")
             .intx("cursor_id", cursor_id)
             .log();
+    }
+}
+
+/// Closes every cursor that no request is using and none has used for the idle timeout: a client that died, or
+/// gave up without closing its cursor, no longer leaves it open until the node stops. Returns how many it closed.
+/// A client that comes back to an expired cursor is told the cursor is unknown, and opens another.
+pub fn expireIdleCursors(self: *Self) usize {
+    if (self.cursor_idle_timeout_ms <= 0) return 0;
+    self.query_cursors_mtx.lock();
+    defer self.query_cursors_mtx.unlock();
+
+    const now = self.milliTimestamp();
+    var expired: usize = 0;
+    // Closing removes from the maps being walked: one cursor a pass
+    while (true) {
+        const idle_id: u64 = found: {
+            var it = self.cursor_last_used.iterator();
+            while (it.next()) |_entry| {
+                if (now - _entry.value_ptr.* < self.cursor_idle_timeout_ms) continue;
+                if (self.cursor_users.contains(_entry.key_ptr.*)) continue;
+                break :found _entry.key_ptr.*;
+            }
+            break;
+        };
+        self.logger.info()
+            .msg("Closing idle query cursor")
+            .intx("cursor_id", idle_id)
+            .int("idle_timeout_ms", self.cursor_idle_timeout_ms)
+            .log();
+        self.closeCursorLocked(idle_id);
+        expired += 1;
+    }
+    return expired;
+}
+
+fn reapIdleCursors(self: *Self) void {
+    // Often enough that a cursor outlives its timeout by a quarter of it at most
+    const interval_ms: u64 = @intCast(std.math.clamp(@divTrunc(self.cursor_idle_timeout_ms, 4), 100, 30_000));
+    while (true) {
+        self.reaper_stop.timedWait(interval_ms * std.time.ns_per_ms) catch {
+            _ = self.expireIdleCursors();
+            continue;
+        };
+        return;
     }
 }
 
@@ -231,6 +308,7 @@ pub fn borrowCursor(self: *Self, cursor_id: u64) ?*QueryCursor {
         return null;
     }
     const query_cursor = self.query_cursors.get(cursor_id) orelse return null;
+    if (self.cursor_last_used.getPtr(cursor_id)) |_last_used| _last_used.* = self.milliTimestamp();
     const users = self.cursor_users.getOrPut(cursor_id) catch return null;
     users.value_ptr.* = if (users.found_existing) users.value_ptr.* + 1 else 1;
     return query_cursor;
@@ -245,6 +323,8 @@ pub fn returnCursor(self: *Self, cursor_id: u64) void {
         _users.* -= 1;
         if (_users.* == 0) {
             _ = self.cursor_users.remove(cursor_id);
+            // Idle from the end of its last traversal, not from the start of it
+            if (self.cursor_last_used.getPtr(cursor_id)) |_last_used| _last_used.* = self.milliTimestamp();
             if (self.cursors_closing.contains(cursor_id)) {
                 self.closeCursorLocked(cursor_id);
             }

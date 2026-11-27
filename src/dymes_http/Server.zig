@@ -63,6 +63,8 @@ pub const Options = struct {
     request_port: u16 = constants.default_request_listen_port,
     ns_ts_supplier: *const fn () i128 = std.time.nanoTimestamp,
     ms_ts_supplier: *const fn () i64 = std.time.milliTimestamp,
+    /// A cursor no request has used for this long is closed; 0 keeps cursors until they are closed
+    cursor_idle_timeout_ms: i64 = constants.default_cursor_idle_timeout_ms,
     health: *Health,
     metrics: *HttpMetrics,
 };
@@ -100,6 +102,7 @@ pub fn init(allocator: Allocator, engine: *Engine, ingester: *Ingester, options:
     const shared_ctx = try SharedContext.init(allocator, options.metrics, options.health, engine, ingester, .{
         .ns_ts_supplier = options.ns_ts_supplier,
         .ms_ts_supplier = options.ms_ts_supplier,
+        .cursor_idle_timeout_ms = options.cursor_idle_timeout_ms,
     });
     errdefer shared_ctx.deinit();
 

@@ -397,7 +397,6 @@ pub fn handleOpenCursor(self: *Self, request: *httpz.Request, response: *httpz.R
 
     response.status = @intFromEnum(std.http.Status.created);
     response.body = std.fmt.allocPrint(request.arena, "{x}", .{cursor_id}) catch return AllocationError.OutOfMemory;
-    self.shared_ctx.metrics.http_cursors_open.increment();
 }
 
 pub fn handleCloseCursor(self: *Self, request: *httpz.Request, response: *httpz.Response) !void {
@@ -407,7 +406,6 @@ pub fn handleCloseCursor(self: *Self, request: *httpz.Request, response: *httpz.
     };
     self.shared_ctx.releaseCursor(cursor_id);
     response.status = @intFromEnum(std.http.Status.ok);
-    self.shared_ctx.metrics.http_cursors_open.decrement();
 }
 
 pub fn handleTraverseCursor(self: *Self, request: *httpz.Request, response: *httpz.Response) !void {

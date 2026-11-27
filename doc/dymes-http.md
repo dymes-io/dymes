@@ -194,6 +194,11 @@ sequenceDiagram
 
 ## Cursor queries
 
+A cursor that no request has used for five minutes is closed by the node, so a client that dies or gives up
+without closing its cursor does not leave it open. A client that comes back to an expired cursor is told the cursor
+is invalid (400), and opens another. Set `engine.http.cursor_idle_timeout_s` to change the limit; `0` keeps cursors
+until they are closed.
+
 Allows retrieveal of a range of messages from Dymes.
 
 ```mermaid
