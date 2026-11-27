@@ -447,6 +447,12 @@ pub fn handleTraverseCursor(self: *Self, request: *httpz.Request, response: *htt
                 .skipped => {
                     // A client that gave up on a read that matches little closes its cursor: stop reading for it
                     skipped += 1;
+                    // A server that is stopping waits for its handlers: a read that matches little must not hold it up
+                    if (skipped % cursor_closing_check_interval == 0 and self.shared_ctx.stopping()) {
+                        response.status = @intFromEnum(std.http.Status.service_unavailable);
+                        response.body = "Stopping";
+                        return;
+                    }
                     if (skipped % cursor_closing_check_interval == 0 and self.shared_ctx.cursorClosing(cursor_id)) {
                         self.logger.debug()
                             .msg("Cursor closed while it was being traversed; traversal abandoned")
