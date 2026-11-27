@@ -23,10 +23,15 @@ store=$(cd "$1" && pwd); manifest=$2; results=$3; shift 3
 bin=${DYMES_BIN:-zig-out/bin}
 port=${BENCH_PORT:-16510}
 mkdir -p "$results"
-work=$(dirname "$store")/.bench-work
+work_base=$(dirname "$store")/.bench-work
+work=$work_base
 url="http://127.0.0.1:$port"
 
+# A new directory each time: a container runtime that shares the host's files can keep serving a
+# directory that was removed and made again under the same name.
 clone() {
+  rm -rf "$work" "$work.yaml"
+  work="$work_base.$1.$$"
   rm -rf "$work"
   if [ "$(uname)" = Darwin ]; then cp -c -R "$store" "$work"; else cp --reflink=auto -R "$store" "$work"; fi
 }
@@ -60,6 +65,9 @@ YAML
   until curl -s -m 2 -o /dev/null "$url/observe/health/ready"; do
     if [ $((SECONDS - began)) -gt 900 ]; then echo "node did not become ready" >&2; return 1; fi
     if [ -n "$node_pid" ] && ! kill -0 "$node_pid" 2>/dev/null; then echo "node exited while starting" >&2; return 1; fi
+    if [ -n "${DYMES_IMAGE:-}" ] && [ "$(docker inspect -f '{{.State.Running}}' dymes-bench 2>/dev/null)" != true ]; then
+      docker logs dymes-bench 2>&1 | tail -5 >&2; echo "node container exited while starting" >&2; return 1
+    fi
     sleep 1
   done
   echo "{\"scenario\":\"$1\",\"node_start_s\":$((SECONDS - began))}" >> "$results/$1.jsonl"
@@ -82,7 +90,7 @@ trap 'stop_node aborted; rm -rf "$work" "$work.yaml"' EXIT
 # that every acknowledged append is there. Native node only.
 crash() {
   local rounds=${CRASH_ROUNDS:-3} round
-  clone
+  clone crash
   for round in $(seq 1 "$rounds"); do
     start_node crash
     "$bin/dymes_bench" run crash-load --url "$url" --manifest "$manifest" --state "$work.acked" \
@@ -106,7 +114,7 @@ for scenario in "$@"; do
   echo "== $scenario" >&2
   : > "$results/$scenario.jsonl"
   if [ "$scenario" = crash ]; then crash; continue; fi
-  clone
+  clone "$scenario"
   start_node "$scenario"
   # shellcheck disable=SC2086
   "$bin/dymes_bench" run "$scenario" --url "$url" --manifest "$manifest" ${BENCH_ARGS:-} \
