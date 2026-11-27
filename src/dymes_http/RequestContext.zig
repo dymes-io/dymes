@@ -453,6 +453,15 @@ pub fn handleTraverseCursor(self: *Self, request: *httpz.Request, response: *htt
                         response.body = "Stopping";
                         return;
                     }
+                    // A client that hung up without closing its cursor is not waiting for the answer either
+                    if (skipped % cursor_closing_check_interval == 0 and clientGone(response)) {
+                        self.logger.debug()
+                            .msg("Client hung up while its cursor was being traversed; traversal abandoned")
+                            .intx("cursor_id", cursor_id)
+                            .int("skipped", skipped)
+                            .log();
+                        return;
+                    }
                     if (skipped % cursor_closing_check_interval == 0 and self.shared_ctx.cursorClosing(cursor_id)) {
                         self.logger.debug()
                             .msg("Cursor closed while it was being traversed; traversal abandoned")
@@ -518,6 +527,14 @@ fn parseQueryRequest(self: *Self, request: *httpz.Request) QueryParseError!Query
             .log();
         return UsageError.MissingArgument;
     }
+}
+
+/// Whether the client has closed its end of the connection. It has sent its one request and waits for the answer, so
+/// there is nothing to read until it sends the next: an end of stream means it has gone.
+fn clientGone(response: *httpz.Response) bool {
+    var probe: [1]u8 = undefined;
+    const got = std.posix.recv(response.conn.stream.handle, &probe, std.posix.MSG.PEEK | std.posix.MSG.DONTWAIT) catch |e| return e != error.WouldBlock;
+    return got == 0;
 }
 
 fn respondWithError(self: *Self, context: []const u8, cause: anyerror, response: *httpz.Response) void {
