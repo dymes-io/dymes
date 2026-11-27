@@ -59,14 +59,16 @@ zig fetch --save https://github.com/carlmontanari/zig-yaml/tarball/feat/zig-0.15
 
 ## [http.zig](https://github.com/dymes-io/http.zig) fork (`dymes/shared-queue`)
 
-A fork of [karlseguin/http.zig](https://github.com/karlseguin/http.zig) at `18e0f2d` with one change: its thread
-pool has one queue for all its threads. Upstream gives each thread its own queue, and a request queued on a thread
-that is running a long request waits for it to end.
+A fork of [karlseguin/http.zig](https://github.com/karlseguin/http.zig) at `18e0f2d` with two changes:
+
+- Its thread pool has one queue for all its threads. Upstream gives each thread its own queue, and a request queued
+  on a thread that is running a long request waits for it to end.
+- Upstream's `d3139e5`: a worker joins its pool threads before it frees the connections they use (#4).
 
 An HTTP/1.1 server for Zig.
 
 ```shell
-zig fetch --save=httpz "git+https://github.com/dymes-io/http.zig?ref=dymes/shared-queue#9024636f0457544b4d6fec51513de1396fb977e3"
+zig fetch --save=httpz "git+https://github.com/dymes-io/http.zig?ref=dymes/shared-queue#12b933f891225ce4d31507482f2742dd1c00467c"
 ```
 
 ## [zimq](https://github.com/uyha/zimq)

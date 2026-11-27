@@ -25,8 +25,8 @@
             .hash = "zig_yaml-0.2.0-C1161pmrAgDnipDTh_4v4RQD27XN5GNaVlzzvlXf1jfW",
         },
         .httpz = .{
-            .url = "git+https://github.com/dymes-io/http.zig?ref=dymes/shared-queue#9024636f0457544b4d6fec51513de1396fb977e3",
-            .hash = "httpz-0.0.0-PNVzrAq4BgBjkdj3uWnUOMOm8d0HqcQj-x0OnpiFu77d",
+            .url = "git+https://github.com/dymes-io/http.zig?ref=dymes/shared-queue#12b933f891225ce4d31507482f2742dd1c00467c",
+            .hash = "httpz-0.0.0-PNVzrHW5BgBmXIMe3EcYJjPqvRrognkL0wFL-P_1miTS",
         },
         .zimq = .{
             .url = "https://github.com/uyha/zimq/archive/969d916e980472a5e7bd01d92fbea1af62256559.tar.gz",
