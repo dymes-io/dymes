@@ -316,6 +316,26 @@ pub fn build(b: *std.Build) void {
     const run_stress_step = b.step("stress", "Run the Dymes stress client");
     run_stress_step.dependOn(&run_stress_cmd.step);
 
+    //------ Dymes benchmark harness
+
+    const dymes_bench_module = b.addModule("dymes_bench", .{
+        .root_source_file = b.path("src/dymes_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "dymes_common", .module = dymes_common_module },
+            .{ .name = "dymes_msg", .module = dymes_msg_module },
+            .{ .name = "dymes_msg_store", .module = dymes_msg_store_module },
+            .{ .name = "dymes_client", .module = dymes_client_module },
+        },
+    });
+
+    const dymes_bench_exe = b.addExecutable(.{
+        .name = "dymes_bench",
+        .root_module = dymes_bench_module,
+    });
+    b.installArtifact(dymes_bench_exe);
+
     //------------ Dymes DDT
 
     const dymes_ddt_module = b.addModule("dymes_ddt", .{
