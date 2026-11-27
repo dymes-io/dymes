@@ -45,6 +45,7 @@ const AppendRequest = engine_api.AppendRequest;
 const QueryCursor = engine_api.QueryCursor;
 const CursorTraversalRequest = engine_api.CursorTraversalRequest;
 const UlidGenerator = @import("UlidGenerator.zig");
+const FairLock = @import("FairLock.zig");
 
 pub const EngineMetrics = @import("metrics.zig").EngineMetrics;
 
@@ -59,7 +60,7 @@ frame_allocator: std.mem.Allocator,
 logger: *Logger,
 storage_subsystem: *StorageSubsystem,
 query_subsystem: *QuerySubsystem,
-mtx_engine: std.Thread.Mutex.Recursive = .init,
+mtx_engine: FairLock = .init,
 ulid_gen: UlidGenerator,
 metrics: *EngineMetrics,
 
@@ -305,10 +306,24 @@ pub fn query(self: *Self, request: QueryRequest) QueryExecutionError!*QueryCurso
 
 pub const CursorTraversalError = AccessError || TimeoutError || AllocationError;
 pub fn traverseCursor(self: *Self, traversal_request: CursorTraversalRequest) CursorTraversalError!?Message {
+    while (true) {
+        switch (try self.stepCursor(traversal_request)) {
+            .message => |message| return message,
+            .skipped => continue,
+            .end => return null,
+        }
+    }
+}
+
+pub const CursorStep = QueryCursor.Step;
+
+/// Takes one step of a cursor's traversal (see `QueryCursor.step`). The engine lock is held for the step only, so
+/// a read that matches few messages gives way to appends and other reads after every message it examines.
+pub fn stepCursor(self: *Self, traversal_request: CursorTraversalRequest) CursorTraversalError!CursorStep {
     self.mtx_engine.lock();
     defer self.mtx_engine.unlock();
 
-    return traversal_request.cursor.next() catch |e| {
+    return traversal_request.cursor.step() catch |e| {
         self.logger.err()
             .msg("Failed to traverse cursor")
             .err(e)

@@ -12,6 +12,7 @@ const io = std.io;
 const clap = @import("clap");
 
 pub const Engine = @import("dymes_engine/Engine.zig");
+pub const FairLock = @import("dymes_engine/FairLock.zig");
 pub const EngineMetrics = Engine.EngineMetrics;
 const engine_api = @import("dymes_engine/api.zig");
 pub const Query = engine_api.Query;

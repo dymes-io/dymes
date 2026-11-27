@@ -135,6 +135,26 @@ pub inline fn next(self: *Self) IteratorError!?Message {
 }
 
 /// Rewinds the cursor to the first result.
+/// One step of a traversal.
+pub const Step = union(enum) {
+    /// The next result
+    message: Message,
+    /// A message was examined and is not a result; there may be more
+    skipped,
+    /// No more results
+    end,
+};
+
+/// Takes one step: examines at most one stored message of a filtered range or channel read. A caller that holds
+/// a lock for a step, not for a whole `next()`, holds it for one message however few messages match.
+pub inline fn step(self: *Self) IteratorError!Step {
+    return switch (self.results_iterator) {
+        .lazy_results => |*lazy_results_it| lazy_results_it.step(),
+        .channel_results => |*channel_results_it| channel_results_it.step(),
+        else => if (try self.next()) |message| .{ .message = message } else .end,
+    };
+}
+
 pub inline fn rewind(self: *Self) IteratorError!void {
     switch (self.results_iterator) {
         .empty_result => |*empty_result_it| empty_result_it.rewind(),

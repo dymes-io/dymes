@@ -36,6 +36,7 @@ const QueryRequest = @import("QueryRequest.zig");
 const FrameAllocator = dymes_msg.FrameAllocator;
 
 const ReadDataset = @import("ReadDataset.zig");
+const QueryCursor = @import("QueryCursor.zig");
 
 const component_name: []const u8 = "msg_store.ChannelResults";
 
@@ -130,15 +131,24 @@ pub const Iterator = struct {
 
     /// Retrieves the next result message (if any).
     pub fn next(self: *Iterator) IteratorError!?Message {
-        next_msg: while (try self.channel_it.next()) |_msg| {
-            for (self.filters) |filter| {
-                if (!filter.apply(_msg)) {
-                    continue :next_msg;
-                }
+        while (true) {
+            switch (try self.step()) {
+                .message => |_msg| return _msg,
+                .skipped => continue,
+                .end => return null,
             }
-            return _msg;
         }
-        return null;
+    }
+
+    /// Examines the next stored message: a result, one the filters reject, or the end.
+    pub fn step(self: *Iterator) IteratorError!QueryCursor.Step {
+        const _msg = try self.channel_it.next() orelse return .end;
+        for (self.filters) |filter| {
+            if (!filter.apply(_msg)) {
+                return .skipped;
+            }
+        }
+        return .{ .message = _msg };
     }
 
     /// Rewinds the cursor to the first result.

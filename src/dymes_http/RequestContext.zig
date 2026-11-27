@@ -438,10 +438,28 @@ pub fn handleTraverseCursor(self: *Self, request: *httpz.Request, response: *htt
         response.status = @intFromEnum(std.http.Status.ok);
 
         var num_results: u64 = 0;
+        var skipped: u64 = 0;
         while (num_results < max_results) {
-            const next = self.shared_ctx.engine.traverseCursor(.{ .cursor = query_cursor }) catch |e| {
+            const next: ?Message = switch (self.shared_ctx.engine.stepCursor(.{ .cursor = query_cursor }) catch |e| {
                 self.respondWithError("Failure while traversing cursor", e, response);
                 return;
+            }) {
+                .message => |message| message,
+                .end => null,
+                .skipped => {
+                    // A client that gave up on a read that matches little closes its cursor: stop reading for it
+                    skipped += 1;
+                    if (skipped % cursor_closing_check_interval == 0 and self.shared_ctx.cursorClosing(cursor_id)) {
+                        self.logger.debug()
+                            .msg("Cursor closed while it was being traversed; traversal abandoned")
+                            .intx("cursor_id", cursor_id)
+                            .int("skipped", skipped)
+                            .log();
+                        self.respondWithError("Cursor closed during traversal", UsageError.IllegalArgument, response);
+                        return;
+                    }
+                    continue;
+                },
             };
 
             if (next) |message| {
@@ -464,6 +482,9 @@ pub fn handleTraverseCursor(self: *Self, request: *httpz.Request, response: *htt
         return;
     }
 }
+
+/// A traversal checks whether its cursor was closed after examining this many messages that matched nothing
+const cursor_closing_check_interval: u64 = 1024;
 
 fn extractCursorId(request: *httpz.Request) UsageError!u64 {
     if (request.param("cursor_id")) |_txt_cursor_id| {
