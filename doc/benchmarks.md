@@ -66,6 +66,18 @@ four CPUs.
 | `cursor-leak` | Opens 32 cursors, reads a batch from each and goes away without closing them. | No cursor is open once the idle limit has passed. |
 | `abandoned-traversal` | Four clients each open a filtered read of the whole store that matches nothing, hang up 200 ms into the fetch and close the cursor from another connection. | A new client is answered promptly once they stop. |
 
+## Faults
+
+```sh
+scripts/bench/run.sh /data/bench/small /data/bench/small.json results crash
+```
+
+`crash` kills the node with `SIGKILL` while four clients append (two a message at a time, two in
+batches) and another reads a large channel, restarts it on the same store, and checks that every
+append the node acknowledged is there, once and in order, that the node appends again and that a
+generated channel reads as before. It does this `CRASH_ROUNDS` times (3), each check covering every
+round so far. Native node only.
+
 Every scenario prints `"ok"`: whether the node met what the scenario checks. Options:
 `--repeat` (reads per case), `--max-messages` (where a read of a large channel stops),
 `--seconds` (how long a load phase lasts) and `--metrics-url`.

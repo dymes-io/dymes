@@ -30,6 +30,8 @@ pub const Options = struct {
     seconds: u64 = 10,
     /// The node's metrics endpoint
     metrics_url: []const u8 = "http://127.0.0.1:6502/observe/metrics",
+    /// Where `crash-load` records what the node acknowledged, for `crash-verify`
+    state: []const u8 = "",
 };
 
 const Sample = struct {
@@ -111,7 +113,8 @@ const Out = struct {
     writer: std.fs.File.Writer = undefined,
 
     fn init(self: *Out) void {
-        self.writer = std.fs.File.stdout().writer(&self.buf);
+        // Streaming: results are appended to a file other processes append to as well
+        self.writer = std.fs.File.stdout().writerStreaming(&self.buf);
     }
 
     fn line(self: *Out, comptime fmt: []const u8, args: anytype) !void {
@@ -153,6 +156,10 @@ pub fn run(allocator: Allocator, options: Options) !void {
         try sparseRouting(allocator, options, manifest, &out);
     } else if (std.mem.eql(u8, options.scenario, "newest")) {
         try newest(allocator, options, &out);
+    } else if (std.mem.eql(u8, options.scenario, "crash-load")) {
+        try crashLoad(allocator, options, manifest, &out);
+    } else if (std.mem.eql(u8, options.scenario, "crash-verify")) {
+        try crashVerify(allocator, options, manifest, &out);
     } else if (std.mem.eql(u8, options.scenario, "rollover")) {
         try rollover(allocator, options, manifest, &out);
     } else if (std.mem.eql(u8, options.scenario, "cursor-leak")) {
@@ -657,5 +664,141 @@ fn rollover(allocator: Allocator, options: Options, manifest: Manifest, out: *Ou
     try out.line("{{\"scenario\":\"rollover\",\"appended\":{d},\"append_s\":{d},\"first_channel\":{d},\"first_channel_read\":{d},\"second_channel\":{d},\"second_channel_read\":{d},\"in_order\":{},\"generated_channel_before\":{d},\"generated_channel_after\":{d},\"ok\":{}}}", .{
         total,                                                                                                                                                      append_ns / std.time.ns_per_s, appended[0], read[0], appended[1], read[1], in_order, mid_before.messages, mid_after.messages,
         read[0] == appended[0] and read[1] == appended[1] and in_order and mid_before.messages == mid_after.messages and mid_before.messages == picks.mid.messages,
+    });
+}
+
+const crash_writers = 4;
+
+fn crashChannel(writer: usize) u128 {
+    return scratch_channel + 16 + writer;
+}
+
+const CrashWriter = struct {
+    allocator: Allocator,
+    url: []const u8,
+    channel: u128,
+    batches: bool,
+    acked: std.array_list.Managed(Ulid),
+
+    /// Appends until the node stops answering, keeping every id the node acknowledged.
+    fn loop(self: *CrashWriter) void {
+        var client = Client.init(self.allocator, self.url) catch return;
+        defer client.deinit();
+        var batch: [25]Client.BatchMessage = undefined;
+        for (&batch) |*message| message.* = .{ .msg_body = "c" ** 300, .channel = self.channel, .routing = 0x1 };
+        var ids: [25]Ulid = undefined;
+        while (true) {
+            if (self.batches) {
+                client.appendMessages(&batch, &ids) catch return;
+                self.acked.appendSlice(&ids) catch return;
+            } else {
+                const id = client.appendMessage("c" ** 300, self.channel, 0x1, null, null) catch return;
+                self.acked.append(id) catch return;
+            }
+        }
+    }
+};
+
+/// Appends on four channels (two a message at a time, two in batches) and reads a large channel,
+/// until the node goes away: the caller kills it mid-append and mid-traversal. Records every id
+/// the node acknowledged in `--state`, for `crash-verify` to check after the node is restarted.
+fn crashLoad(allocator: Allocator, options: Options, manifest: Manifest, out: *Out) !void {
+    if (options.state.len == 0) return error.StateFileRequired;
+    var writers: [crash_writers]CrashWriter = undefined;
+    var threads: [crash_writers]std.Thread = undefined;
+    for (&writers, &threads, 0..) |*writer, *thread, i| {
+        writer.* = .{ .allocator = allocator, .url = options.url, .channel = crashChannel(i), .batches = i >= 2, .acked = .init(allocator) };
+        thread.* = try std.Thread.spawn(.{}, CrashWriter.loop, .{writer});
+    }
+    defer for (&writers) |*writer| writer.acked.deinit();
+
+    // A traversal in flight when the node dies
+    var read: u64 = 0;
+    {
+        var client = try Client.init(allocator, options.url);
+        defer client.deinit();
+        const from = ulid_min.encode();
+        const to = ulid_max.encode();
+        const big = try manifest.channels[0].channelId();
+        if (client.openCursor(channelQuery(big, &from, &to, &.{}), .{ .batch_size = 31 }) catch null) |cursor| {
+            while (cursor.next() catch null) |_| read += 1;
+        }
+    }
+    for (&threads) |*thread| thread.join();
+
+    // Added to what earlier rounds recorded: each check covers every round so far
+    var file = try std.fs.cwd().createFile(options.state, .{ .truncate = false });
+    defer file.close();
+    var buf: [64 * 1024]u8 = undefined;
+    var file_writer = file.writer(&buf);
+    try file_writer.seekTo(try file.getEndPos());
+    var total: usize = 0;
+    for (&writers, 0..) |*writer, i| {
+        for (writer.acked.items) |id| try file_writer.interface.print("{d} {s}\n", .{ i, id.encode() });
+        total += writer.acked.items.len;
+    }
+    try file_writer.interface.flush();
+    try out.line("{{\"scenario\":\"crash-load\",\"acknowledged\":{d},\"read_before_crash\":{d}}}", .{ total, read });
+}
+
+/// After a restart: every append the node acknowledged before it was killed is there, once, in
+/// order; the node appends again; a generated channel reads as it did.
+fn crashVerify(allocator: Allocator, options: Options, manifest: Manifest, out: *Out) !void {
+    if (options.state.len == 0) return error.StateFileRequired;
+    const text = try std.fs.cwd().readFileAlloc(allocator, options.state, 1024 * 1024 * 1024);
+    defer allocator.free(text);
+
+    var acked: [crash_writers]std.array_list.Managed(Ulid) = undefined;
+    for (&acked) |*list| list.* = .init(allocator);
+    defer for (&acked) |*list| list.deinit();
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |line_text| {
+        var parts = std.mem.tokenizeScalar(u8, line_text, ' ');
+        const writer = try std.fmt.parseUnsigned(usize, parts.next() orelse continue, 10);
+        try acked[writer].append(try common.ulid.decode(parts.next() orelse continue));
+    }
+
+    var client = try Client.init(allocator, options.url);
+    defer client.deinit();
+    const from = ulid_min.encode();
+    const to = ulid_max.encode();
+    var acknowledged: u64 = 0;
+    var missing: u64 = 0;
+    var unacknowledged: u64 = 0;
+    var out_of_order: u64 = 0;
+    for (&acked, 0..) |*list, i| {
+        acknowledged += list.items.len;
+        var next_acked: usize = 0;
+        var previous: Ulid = ulid_min;
+        const maybe_cursor = try client.openCursor(channelQuery(crashChannel(i), &from, &to, &.{}), .{ .batch_size = 31 });
+        if (maybe_cursor) |cursor| {
+            defer cursor.close();
+            while (try cursor.next()) |message| {
+                const id = message.id();
+                if (!common.util.isBeforeUlid(previous, id)) out_of_order += 1;
+                previous = id;
+                // Acknowledged ids were recorded in order; skip those the store does not hold
+                while (next_acked < list.items.len and common.util.isBeforeUlid(list.items[next_acked], id)) {
+                    next_acked += 1;
+                    missing += 1;
+                }
+                if (next_acked < list.items.len and list.items[next_acked].equals(id)) {
+                    next_acked += 1;
+                } else {
+                    // Stored, but the node died before it could say so
+                    unacknowledged += 1;
+                }
+            }
+        }
+        missing += list.items.len - next_acked;
+    }
+
+    const appends_again = probeAppend(allocator, options.url) != null;
+    const picks = try pick(manifest);
+    const mid = try readAll(&client, channelQuery(try picks.mid.channelId(), &from, &to, &.{}), std.math.maxInt(u64));
+
+    try out.line("{{\"scenario\":\"crash-verify\",\"acknowledged\":{d},\"missing\":{d},\"out_of_order\":{d},\"stored_unacknowledged\":{d},\"appends_again\":{},\"generated_channel\":{d},\"generated_channel_expected\":{d},\"ok\":{}}}", .{
+        acknowledged,                                                                                                     missing, out_of_order, unacknowledged, appends_again, mid.messages, picks.mid.messages,
+        acknowledged > 0 and missing == 0 and out_of_order == 0 and appends_again and mid.messages == picks.mid.messages,
     });
 }

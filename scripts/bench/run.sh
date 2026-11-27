@@ -78,9 +78,34 @@ stop_node() {
 }
 trap 'stop_node aborted; rm -rf "$work" "$work.yaml"' EXIT
 
+# Kills the node (SIGKILL) while clients append and read, restarts it on the same store and checks
+# that every acknowledged append is there. Native node only.
+crash() {
+  local rounds=${CRASH_ROUNDS:-3} round
+  clone
+  for round in $(seq 1 "$rounds"); do
+    start_node crash
+    "$bin/dymes_bench" run crash-load --url "$url" --manifest "$manifest" --state "$work.acked" \
+      >> "$results/crash.jsonl" 2>> "$results/crash.bench.log" &
+    local load_pid=$!
+    sleep $((2 + RANDOM % 4))
+    kill -9 "$node_pid"; wait "$node_pid" 2>/dev/null || true; node_pid=""
+    pkill -f "$bin/dymes_dme" 2>/dev/null || true
+    wait "$load_pid" || true
+    cp "$results/crash.node.log" "$results/crash.node.$round.killed.log"
+    start_node crash
+    "$bin/dymes_bench" run crash-verify --url "$url" --manifest "$manifest" --state "$work.acked" \
+      >> "$results/crash.jsonl" 2>> "$results/crash.bench.log" || echo '{"scenario":"crash-verify","ok":false,"failed":true}' >> "$results/crash.jsonl"
+    stop_node crash
+  done
+  rm -f "$work.acked"
+  cat "$results/crash.jsonl"
+}
+
 for scenario in "$@"; do
   echo "== $scenario" >&2
   : > "$results/$scenario.jsonl"
+  if [ "$scenario" = crash ]; then crash; continue; fi
   clone
   start_node "$scenario"
   # shellcheck disable=SC2086
