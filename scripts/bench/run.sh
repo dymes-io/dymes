@@ -15,6 +15,8 @@
 #   DYMES_IMAGE   run the node from this container image instead (4 CPUs, DYMES_CPUS to change)
 #   BENCH_PORT    HTTP port (default: 16510)
 #   DYMES_CURSOR_IDLE_S  the native node's cursor idle timeout in seconds (default: the node's)
+#   DYMES_INDEXED_HEADER  the native node's indexed header (engine.store.indexed_header); the runner
+#                 waits for the header index before a scenario
 #   BENCH_ARGS    extra arguments for every `dymes_bench run`
 #   BENCH_SMALL_FS  for disk-full: an empty directory on a filesystem about 400 MB larger than the
 #                 store (on macOS a disk image is made and removed when this is not set)
@@ -56,6 +58,7 @@ engine:
   store:
     id: 1
     data_path: "$work"
+${DYMES_INDEXED_HEADER:+    indexed_header: "$DYMES_INDEXED_HEADER"}
   http:
     host: "127.0.0.1"
     port: $port
@@ -73,6 +76,14 @@ YAML
     sleep 1
   done
   echo "{\"scenario\":\"$1\",\"node_start_s\":$((SECONDS - began))}" >> "$results/$1.jsonl"
+  # The header index is built in the background: wait for it, so the scenario measures reads that have it
+  if [ -n "${DYMES_INDEXED_HEADER:-}" ] && [ -n "$node_pid" ]; then
+    until grep -q "Segment header indexes ready" "$results/$1.node.log"; do
+      if [ $((SECONDS - began)) -gt 7200 ] || ! kill -0 "$node_pid" 2>/dev/null; then echo "header index not built" >&2; return 1; fi
+      sleep 1
+    done
+    echo "{\"scenario\":\"$1\",\"header_index_ready_s\":$((SECONDS - began))}" >> "$results/$1.jsonl"
+  fi
 }
 
 stop_node() {

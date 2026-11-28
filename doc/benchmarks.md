@@ -58,7 +58,7 @@ four CPUs.
 | Scenario | What it does | What a fit node shows |
 | --- | --- | --- |
 | `channel-read` | Reads a channel of dozens of messages, a mid-sized one and the largest, whole and for the last day. | The time follows the channel's messages, not the store's: a small channel reads in under 100 ms on a store of any size. |
-| `tracking-lookup` | Finds a run by its `tracking_id` header on its channel: over the run's own range, over a day, and to the store's end. | Under 1 s on the largest channel over a day. |
+| `tracking-lookup` | Finds a run by its `tracking_id` header on its channel: over the run's own range, over a day, and to the store's end. | Under 1 s on the largest channel over a day; with `DYMES_INDEXED_HEADER=tracking_id` the time follows the run's messages, not the channel's, to the store's end too. |
 | `sparse-routing` | Reads the whole store with a routing filter that matches almost nothing, while another client appends every 20 ms. | Appends take as long during the scan as before it. |
 | `mixed-load` | An appender, 23 consumers each following a channel, two lookups by tracking id and a sparse routing consumer, together. | Appends under 100 ms at the 99th percentile and under 1 s at worst. The engine lock held for over 10 ms by fewer than one request in a hundred, and never for 50 ms (`engine_lock_*` metrics). |
 | `newest` | A channel query starting at the store's newest message, and channel and range queries whose range ends before it starts. | The message comes back, the inverted ranges are refused, and the node still answers. |

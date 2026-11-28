@@ -40,6 +40,7 @@ const MessageIndex = @import("MessageIndex.zig");
 const MessageFile = @import("MessageFile.zig");
 const ChannelIndex = @import("ChannelIndex.zig");
 const ChannelIndexFile = @import("ChannelIndexFile.zig");
+const HeaderIndexFile = @import("HeaderIndexFile.zig");
 
 /// Message store dataset options
 pub const Options = struct {
@@ -116,17 +117,34 @@ channel_dirs: std.array_list.Managed(?ChannelIndexFile.Directory),
 light_segments: [limits.max_open_channel_read_segments]?LightSegment = [_]?LightSegment{null} ** limits.max_open_channel_read_segments,
 light_clock: u64 = 0,
 
+/// The header the store keeps a hash index of, if any (owned)
+indexed_header: ?[]u8 = null,
+
+/// Which closed segments have a header index file that has been checked, by segment number (under the dataset lock)
+hdx_ready: std.array_list.Managed(bool),
+
+/// Builds and checks header index files in the background, the newest segment first
+hdx_builder: ?std.Thread = null,
+hdx_mutex: std.Thread.Mutex = .{},
+hdx_wake: std.Thread.Condition = .{},
+/// Segments waiting for the builder; it takes the last
+hdx_queue: std.array_list.Managed(u64),
+hdx_stop: bool = false,
+
 /// A closed segment's message file and channel index file, open for reading. Channel reads use these and
 /// never load the segment's index.
 const LightSegment = struct {
     segment_no: u64,
     msg_file: std.fs.File,
     chx_file: std.fs.File,
+    /// The segment's header index file, opened when a read first wants it
+    hdx_file: ?std.fs.File = null,
     last_used: u64,
 
     fn close(self: *LightSegment) void {
         self.msg_file.close();
         self.chx_file.close();
+        if (self.hdx_file) |file| file.close();
     }
 };
 
@@ -213,7 +231,143 @@ pub fn open(gpa: std.mem.Allocator, frame_allocator: std.mem.Allocator, segments
         .last_ulid = last_ulid,
         .segments_ulid_idx = segments_ulid_idx,
         .channel_dirs = std.array_list.Managed(?ChannelIndexFile.Directory).init(gpa),
+        .hdx_ready = std.array_list.Managed(bool).init(gpa),
+        .hdx_queue = std.array_list.Managed(u64).init(gpa),
     };
+}
+
+/// Starts keeping a hash index of the header `key`: a background thread checks each closed segment's header
+/// index file and builds those that are missing or can't be trusted, the newest segment first. Until a segment's
+/// file is ready, reads of it fetch frames as before. Call once the dataset is at its final address.
+pub fn startHeaderIndex(self: *Self, key: []const u8) (AllocationError || CreationError)!void {
+    assert(self.hdx_builder == null);
+    if (key.len == 0) return;
+    self.mtx_dataset.lock();
+    defer self.mtx_dataset.unlock();
+    self.indexed_header = self.gpa.dupe(u8, key) catch return AllocationError.OutOfMemory;
+    errdefer {
+        self.gpa.free(self.indexed_header.?);
+        self.indexed_header = null;
+    }
+    self.hdx_queue.ensureTotalCapacity(self.channel_dirs.items.len) catch return AllocationError.OutOfMemory;
+    for (0..self.channel_dirs.items.len) |segment_no| self.hdx_queue.appendAssumeCapacity(segment_no);
+    self.hdx_builder = std.Thread.spawn(.{}, headerIndexBuilder, .{self}) catch return CreationError.OtherCreationFailure;
+}
+
+fn headerIndexBuilder(self: *Self) void {
+    const key = self.indexed_header.?;
+    var built: u64 = 0;
+    var checked: u64 = 0;
+    while (true) {
+        self.hdx_mutex.lock();
+        while (self.hdx_queue.items.len == 0 and !self.hdx_stop) {
+            if (checked > 0) {
+                self.logger.info()
+                    .msg("Segment header indexes ready")
+                    .str("header", key)
+                    .int("segments", checked)
+                    .int("built", built)
+                    .log();
+                checked = 0;
+                built = 0;
+            }
+            self.hdx_wake.wait(&self.hdx_mutex);
+        }
+        if (self.hdx_stop) {
+            self.hdx_mutex.unlock();
+            return;
+        }
+        const segment_no = self.hdx_queue.pop().?;
+        self.hdx_mutex.unlock();
+
+        if (!HeaderIndexFile.valid(self.gpa, self.dir, segment_no, key)) {
+            // A copy of the segment's channel directory: the dataset may drop its own meanwhile
+            var directory: ChannelIndexFile.Directory = copied: {
+                self.mtx_dataset.lock();
+                defer self.mtx_dataset.unlock();
+                const held = self.channelDirectory(segment_no) orelse continue;
+                break :copied .{
+                    .first_id = held.first_id,
+                    .last_id = held.last_id,
+                    .num_entries = held.num_entries,
+                    .entries = self.gpa.dupe(ChannelIndexFile.DirEntry, held.entries) catch continue,
+                };
+            };
+            defer directory.deinit(self.gpa);
+            var timer = std.time.Timer.start() catch null;
+            // The general allocator, not the frame allocator: this is not a request thread
+            HeaderIndexFile.build(self.gpa, self.gpa, self.dir, segment_no, &directory, key) catch |e| {
+                self.logger.warn()
+                    .msg("Failed to build a segment's header index; reads of it fetch every frame of a channel")
+                    .err(e)
+                    .int("segment_no", segment_no)
+                    .log();
+                continue;
+            };
+            built += 1;
+            // A build reads a whole message file. Resting as long as it took leaves the requests half the disk.
+            if (timer) |*_timer| self.restBuilder(_timer.read());
+            if (built % 64 == 0) {
+                self.logger.info()
+                    .msg("Building segment header indexes")
+                    .int("segment_no", segment_no)
+                    .int("built", built)
+                    .log();
+            }
+        }
+        checked += 1;
+
+        self.mtx_dataset.lock();
+        defer self.mtx_dataset.unlock();
+        // Only while the channel index file it follows is still in use
+        if (self.channelDirectory(segment_no) == null) continue;
+        while (self.hdx_ready.items.len <= segment_no) self.hdx_ready.append(false) catch break;
+        if (segment_no < self.hdx_ready.items.len) self.hdx_ready.items[@intCast(segment_no)] = true;
+    }
+}
+
+/// Waits for `ns`, or until the dataset is closing.
+fn restBuilder(self: *Self, ns: u64) void {
+    self.hdx_mutex.lock();
+    defer self.hdx_mutex.unlock();
+    if (!self.hdx_stop) self.hdx_wake.timedWait(&self.hdx_mutex, ns) catch {};
+}
+
+/// Whether a closed segment's header index file is in use (tests).
+fn headerIndexReady(self: *Self, segment_no: u64) bool {
+    self.mtx_dataset.lock();
+    defer self.mtx_dataset.unlock();
+    return segment_no < self.hdx_ready.items.len and self.hdx_ready.items[@intCast(segment_no)];
+}
+
+/// The hash to look for in the header index, if these filters ask for one value of the indexed header.
+pub fn headerHashFor(self: *const Self, filters: []const dymes_msg.Filter) ?u32 {
+    const key = self.indexed_header orelse return null;
+    for (filters) |filter| {
+        switch (filter) {
+            .kv_filter => |kv_filter| switch (kv_filter) {
+                .eql => |pair| if (std.mem.eql(u8, pair.key, key)) return HeaderIndexFile.valueHash(pair.value),
+                else => {},
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// A closed segment's header index file, if it has one that has been checked. Under the dataset lock.
+fn headerIndexFile(self: *Self, light: *LightSegment) ?std.fs.File {
+    if (light.segment_no >= self.hdx_ready.items.len or !self.hdx_ready.items[@intCast(light.segment_no)]) return null;
+    if (light.hdx_file == null) light.hdx_file = HeaderIndexFile.openForRead(self.dir, light.segment_no) catch return null;
+    return light.hdx_file;
+}
+
+fn queueHeaderIndex(self: *Self, segment_no: u64) void {
+    if (self.hdx_builder == null) return;
+    self.hdx_mutex.lock();
+    defer self.hdx_mutex.unlock();
+    self.hdx_queue.append(segment_no) catch return;
+    self.hdx_wake.signal();
 }
 
 /// Loads the channel directory of every closed segment, building the channel index file of each segment that
@@ -277,6 +431,7 @@ pub fn segmentClosed(self: *Self, segment_no: u64) void {
     }
     if (self.channel_dirs.items.len == segment_no) {
         self.channel_dirs.append(self.buildChannelIndex(segment_no)) catch return;
+        self.queueHeaderIndex(segment_no);
     }
 }
 
@@ -300,6 +455,9 @@ fn dropChannelDirectory(self: *Self, segment_no: u64) void {
     if (self.channel_dirs.items[segment_no]) |*directory| directory.deinit(self.gpa);
     self.channel_dirs.items[segment_no] = null;
     ChannelIndexFile.remove(self.dir, segment_no);
+    // The header index is in the channel index file's order
+    if (segment_no < self.hdx_ready.items.len) self.hdx_ready.items[@intCast(segment_no)] = false;
+    HeaderIndexFile.remove(self.dir, segment_no);
 }
 
 fn lightSegment(self: *Self, segment_no: u64) AccessError!*LightSegment {
@@ -350,6 +508,15 @@ fn readRunFrame(light: *LightSegment, run_entry: ChannelIndexFile.RunEntry, chan
 
 /// Closes (de-initializes) a dataset.
 pub fn close(self: *Self) void {
+    // Before the lock: the builder takes it
+    if (self.hdx_builder) |builder| {
+        self.hdx_mutex.lock();
+        self.hdx_stop = true;
+        self.hdx_mutex.unlock();
+        self.hdx_wake.signal();
+        builder.join();
+        self.hdx_builder = null;
+    }
     self.mtx_dataset.lock();
     defer self.mtx_dataset.unlock();
     if (!self.status.opened) {
@@ -365,6 +532,9 @@ pub fn close(self: *Self) void {
         .log();
     defer self.segments_cache.deinit();
     defer self.channel_dirs.deinit();
+    defer self.hdx_ready.deinit();
+    defer self.hdx_queue.deinit();
+    defer if (self.indexed_header) |key| self.gpa.free(key);
     for (self.channel_dirs.items) |*maybe_directory| {
         if (maybe_directory.*) |*directory| directory.deinit(self.gpa);
     }
@@ -408,11 +578,20 @@ pub fn rangeIterator(self: *Self, first_ulid: Ulid, final_ulid: Ulid, first_segm
 ///
 /// The caller gains ownership of the iterator, and must call `close()` to release resources.
 pub fn channelIterator(self: *Self, channel_id: u128, first_ulid: Ulid, final_ulid: Ulid, first_segment: u64, final_segment: u64) AllocationError!ChannelIterator {
+    return self.channelIteratorFor(channel_id, first_ulid, final_ulid, first_segment, final_segment, null);
+}
+
+/// As `channelIterator`, for a read that wants only messages whose indexed header hashes to `header_hash`
+/// (`headerHashFor`). The iterator leaves out messages the header index rules out; it may still return others,
+/// so the caller applies its filters as before.
+pub fn channelIteratorFor(self: *Self, channel_id: u128, first_ulid: Ulid, final_ulid: Ulid, first_segment: u64, final_segment: u64, header_hash: ?u32) AllocationError!ChannelIterator {
     self.mtx_dataset.lock();
     defer self.mtx_dataset.unlock();
     assert(first_segment >= 0);
     assert(final_segment < self.num_segments);
-    return ChannelIterator.init(self, channel_id, first_ulid, final_ulid, first_segment, final_segment);
+    var it = try ChannelIterator.init(self, channel_id, first_ulid, final_ulid, first_segment, final_segment);
+    it.header_hash = header_hash;
+    return it;
 }
 
 const Message = @import("dymes_msg").Message;
@@ -1325,6 +1504,7 @@ fn segmentClosedNow(self: *Self, segment_no: u64) bool {
 
 pub const ChannelIterator = struct {
     const chunk_len = 128;
+    const hash_chunk_len = 4096;
     const no_segment = std.math.maxInt(u64);
 
     logger: *logging.Logger,
@@ -1344,6 +1524,20 @@ pub const ChannelIterator = struct {
     chunk_segment: u64 = no_segment,
     chunk_start: u64 = 0,
     chunk_count: usize = 0,
+    /// The hash of the indexed header the read wants, if it wants one value of it
+    header_hash: ?u32 = null,
+    /// Hashes read ahead from the current segment's header index file
+    hashes: [hash_chunk_len]u32 = undefined,
+    hash_segment: u64 = no_segment,
+    hash_start: u64 = 0,
+    hash_count: usize = 0,
+
+    pub const Step = union(enum) {
+        message: Message,
+        /// A stretch of the channel was passed over without a result; there may be more
+        skipped,
+        end,
+    };
 
     fn init(read_dataset: *ReadDataset, channel_id: u128, first_ulid: Ulid, final_ulid: Ulid, first_segment: u64, final_segment: u64) AllocationError!ChannelIterator {
         // A range of one id is a range: a query starting at the store's newest message is clamped to it.
@@ -1413,16 +1607,28 @@ pub const ChannelIterator = struct {
     }
 
     pub fn next(self: *ChannelIterator) IteratorError!?Message {
+        while (true) {
+            switch (try self.step()) {
+                .message => |msg| return msg,
+                .skipped => continue,
+                .end => return null,
+            }
+        }
+    }
+
+    /// The channel's next message, or the news that a stretch of it held none the read wants: a read that
+    /// matches little hands control back between stretches.
+    pub fn step(self: *ChannelIterator) IteratorError!Step {
         const read_dataset = self.read_dataset;
         // A loop, not a recursive call per segment: a read across many segments overflowed a worker
         // thread's stack (#7).
         while (true) {
             if (self.reached_end) {
-                return null;
+                return .end;
             }
             if (self.current_segment > self.final_segment) {
                 self.end();
-                return null;
+                return .end;
             }
 
             read_dataset.mtx_dataset.lock();
@@ -1441,11 +1647,11 @@ pub const ChannelIterator = struct {
                 }
                 if (isBeforeUlid(self.final_ulid, dir_entry.first_id)) {
                     self.end();
-                    return null;
+                    return .end;
                 }
 
                 const light = try read_dataset.lightSegment(self.current_segment);
-                const pos = self.run_pos orelse found: {
+                var pos = self.run_pos orelse found: {
                     const start = if (isBeforeUlid(dir_entry.first_id, self.first_ulid))
                         try ChannelIndexFile.lowerBound(light.chx_file, directory, dir_entry, self.first_ulid)
                     else
@@ -1458,10 +1664,29 @@ pub const ChannelIterator = struct {
                     continue;
                 }
 
+                // A read for one value of the indexed header: pass over the messages whose hash differs
+                if (self.header_hash) |wanted| {
+                    if (read_dataset.headerIndexFile(light)) |hdx_file| {
+                        if (self.hash_segment != self.current_segment or pos < self.hash_start or pos >= self.hash_start + self.hash_count) {
+                            self.hash_count = HeaderIndexFile.readHashes(hdx_file, dir_entry, pos, &self.hashes) catch 0;
+                            self.hash_segment = self.current_segment;
+                            self.hash_start = pos;
+                        }
+                        // Unreadable: the frames are read instead
+                        if (self.hash_count > 0) {
+                            var at: usize = @intCast(pos - self.hash_start);
+                            while (at < self.hash_count and self.hashes[at] != wanted) at += 1;
+                            pos = self.hash_start + at;
+                            self.run_pos = pos;
+                            if (at == self.hash_count) return .skipped;
+                        }
+                    }
+                }
+
                 const run_entry = try self.runEntry(light, directory, dir_entry, pos);
                 if (isBeforeUlid(self.final_ulid, run_entry.id)) {
                     self.end();
-                    return null;
+                    return .end;
                 }
                 const msg = readRunFrame(light, run_entry, self.channel_id, self.msg_buffer) catch |e| {
                     // The file does not match its segment. Positions in a run are the same in the segment cache,
@@ -1478,7 +1703,7 @@ pub const ChannelIterator = struct {
                     continue;
                 };
                 self.run_pos = pos + 1;
-                return msg;
+                return .{ .message = msg };
             }
 
             // The segment being appended to (or one without a channel index file): through the segment cache
@@ -1505,10 +1730,10 @@ pub const ChannelIterator = struct {
             if (!isSameOrBeforeUlid(msg.id(), self.final_ulid)) {
                 // Overshot final message
                 self.end();
-                return null;
+                return .end;
             }
             self.run_pos = pos + 1;
-            return msg;
+            return .{ .message = msg };
         }
     }
 
@@ -1517,6 +1742,7 @@ pub const ChannelIterator = struct {
         self.reached_end = false;
         self.run_pos = null;
         self.chunk_segment = no_segment;
+        self.hash_segment = no_segment;
     }
 };
 
@@ -1970,4 +2196,176 @@ test "ReadDataset.RangeIterator.closed segments and range start" {
         }
         try testing.expectEqual(null, try it.next());
     }
+}
+
+test "ReadDataset.ChannelIterator.header index" {
+    std.debug.print("test.ReadDataset.ChannelIterator.header index\n", .{});
+    const allocator = testing.allocator;
+    const out_buffer = try allocator.alloc(u8, 2048);
+    defer allocator.free(out_buffer);
+    var stderr_writer = std.fs.File.stderr().writer(out_buffer);
+
+    const prev_default_logging_filter_level = logging.default_logging_filter_level;
+    defer logging.default_logging_filter_level = prev_default_logging_filter_level;
+    logging.default_logging_filter_level = logging.LogLevel.none;
+
+    try logging.init(allocator, &stderr_writer);
+    defer logging.deinit();
+    var fah = FrameAllocator.init(allocator);
+    const frame_allocator = fah.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp_dir.cleanup();
+
+    // Two closed segments and a third being appended to. Three channels take turns. Messages come in runs of
+    // 3,000, each run with its own value of the header "run"; every 11th message has no such header.
+    const number_of_messages: usize = 2 * limits.max_message_file_entries + 1000;
+    const run_len: usize = 3000;
+    const ids = try allocator.alloc(Ulid, number_of_messages);
+    defer allocator.free(ids);
+    const Shape = struct {
+        fn channelOf(idx: usize) u128 {
+            return idx % 3;
+        }
+        fn runOf(idx: usize) ?usize {
+            return if (idx % 11 == 5) null else idx / run_len;
+        }
+    };
+
+    {
+        const Dataset = @import("Dataset.zig");
+        var dataset = try Dataset.open(allocator, frame_allocator, std.time.nanoTimestamp(), .{ .dir = tmp_dir.dir });
+        defer dataset.close();
+
+        const message_frame: []u8 = try allocator.alloc(u8, 512);
+        defer allocator.free(message_frame);
+        var ulid_generator = common.ulid.generator();
+        var value_buf: [32]u8 = undefined;
+        for (0..number_of_messages) |idx| {
+            ids[idx] = try ulid_generator.next();
+            var headers = std.StringArrayHashMap([]const u8).init(allocator);
+            defer headers.deinit();
+            try headers.put("kind", "test");
+            if (Shape.runOf(idx)) |run| try headers.put("run", try std.fmt.bufPrint(&value_buf, "run-{d}", .{run}));
+            var test_msg = try Message.initOverlay(message_frame, idx, ids[idx], Shape.channelOf(idx), 101, "A" ** 32, .{ .transient_kv_headers = headers });
+            _ = try dataset.store(&test_msg);
+        }
+        try dataset.sync();
+    }
+
+    const Check = struct {
+        const Counts = struct { results: usize, fetched: usize };
+
+        /// Reads `channel` over ids[from..to] (both included) for the run `run`, as a channel read with a header
+        /// filter does, and expects exactly the run's messages on the channel there, in order. Returns how many
+        /// frames the iterator fetched to find them.
+        fn lookup(rd: *ReadDataset, fa: std.mem.Allocator, all_ids: []const Ulid, channel: u128, from: usize, to: usize, run: usize) !Counts {
+            var value_buf: [32]u8 = undefined;
+            const value = try std.fmt.bufPrint(&value_buf, "run-{d}", .{run});
+            const filters = [_]dymes_msg.Filter{.{ .kv_filter = .{ .eql = .{ .key = "run", .value = value } } }};
+            var it = try rd.channelIteratorFor(channel, all_ids[from], all_ids[to], 0, rd.num_segments - 1, rd.headerHashFor(&filters));
+            defer it.close(fa);
+            var counts: Counts = .{ .results = 0, .fetched = 0 };
+            var expected = from;
+            while (try it.next()) |msg| {
+                counts.fetched += 1;
+                if (!filters[0].apply(msg)) continue;
+                while (expected <= to and (Shape.channelOf(expected) != channel or Shape.runOf(expected) != run)) expected += 1;
+                if (expected > to) return error.TestUnexpectedMessage;
+                try testing.expectEqual(all_ids[expected], msg.id());
+                expected += 1;
+                counts.results += 1;
+            }
+            while (expected <= to) : (expected += 1) {
+                if (Shape.channelOf(expected) == channel and Shape.runOf(expected) == run) return error.TestExpectedMessage;
+            }
+            return counts;
+        }
+
+        fn ready(rd: *ReadDataset, segments: u64) !void {
+            var waited: usize = 0;
+            while (!(rd.headerIndexReady(0) and (segments < 2 or rd.headerIndexReady(1)))) : (waited += 1) {
+                if (waited > 60_000) return error.TestHeaderIndexNotBuilt;
+                std.Thread.sleep(std.time.ns_per_ms);
+            }
+        }
+    };
+    const last = number_of_messages - 1;
+    const seg = limits.max_message_file_entries;
+    const in_first = 17; // a run wholly inside the first closed segment
+    const across = seg / run_len; // the run that is being written when the first segment closes
+    const in_open = last / run_len; // the newest run, in the segment being appended to
+
+    var segments_ulid_idx = try SegmentsUlidIndex.init(allocator, 10);
+    defer segments_ulid_idx.deinit(allocator);
+    {
+        var read_dataset = try ReadDataset.open(allocator, frame_allocator, &segments_ulid_idx, .{ .dir = tmp_dir.dir });
+        defer read_dataset.close();
+        try read_dataset.prepareChannelIndex();
+        try read_dataset.populateSegmentsUlidIndex(&segments_ulid_idx);
+
+        // Without a header index every frame of the channel in the range is fetched
+        try testing.expectEqual(null, read_dataset.headerHashFor(&.{.{ .kv_filter = .{ .eql = .{ .key = "run", .value = "run-17" } } }}));
+        const plain = try Check.lookup(&read_dataset, frame_allocator, ids, 1, 0, seg - 1, in_first);
+        try testing.expect(plain.results > 800 and plain.fetched > seg / 4);
+
+        try read_dataset.startHeaderIndex("run");
+        try Check.ready(&read_dataset, 2);
+        try tmp_dir.dir.access("dymes_0.hdx", .{});
+        try tmp_dir.dir.access("dymes_1.hdx", .{});
+        try testing.expectError(error.FileNotFound, tmp_dir.dir.access("dymes_2.hdx", .{}));
+        // Another header is not indexed
+        try testing.expectEqual(null, read_dataset.headerHashFor(&.{.{ .kv_filter = .{ .eql = .{ .key = "kind", .value = "test" } } }}));
+
+        // With it, a read inside the closed segments fetches the run's frames and no others
+        const indexed = try Check.lookup(&read_dataset, frame_allocator, ids, 1, 0, seg - 1, in_first);
+        try testing.expectEqual(plain.results, indexed.results);
+        try testing.expectEqual(indexed.results, indexed.fetched);
+        // From the middle of a run; a run across the two closed segments; a range that ends inside the run
+        _ = try Check.lookup(&read_dataset, frame_allocator, ids, 0, in_first * run_len + 100, seg + 5, in_first);
+        const spanning = try Check.lookup(&read_dataset, frame_allocator, ids, 2, 0, 2 * seg - 1, across);
+        try testing.expectEqual(spanning.results, spanning.fetched);
+        _ = try Check.lookup(&read_dataset, frame_allocator, ids, 2, 0, across * run_len + 500, across);
+        // To the store's end: the segment being appended to has no header index, and is read as before
+        const to_end = try Check.lookup(&read_dataset, frame_allocator, ids, 0, 0, last, in_open);
+        try testing.expect(to_end.results > 0 and to_end.fetched >= to_end.results);
+        _ = try Check.lookup(&read_dataset, frame_allocator, ids, 1, seg / 2, last, in_first);
+        // A value no message has
+        const none = try Check.lookup(&read_dataset, frame_allocator, ids, 1, 0, 2 * seg - 1, 1_000_000);
+        try testing.expectEqual(0, none.results);
+    }
+
+    // A damaged file, and one built for another header, are not trusted
+    try testing.expect(HeaderIndexFile.valid(allocator, tmp_dir.dir, 0, "run"));
+    try testing.expect(!HeaderIndexFile.valid(allocator, tmp_dir.dir, 0, "kind"));
+    {
+        var hdx = try tmp_dir.dir.openFile("dymes_0.hdx", .{ .mode = .read_write });
+        defer hdx.close();
+        try hdx.pwriteAll(&[_]u8{ 0xA5, 0xA5, 0xA5, 0xA5 }, @sizeOf(HeaderIndexFile.Header) + 4 * 1234);
+    }
+    try testing.expect(!HeaderIndexFile.valid(allocator, tmp_dir.dir, 0, "run"));
+    try tmp_dir.dir.deleteFile("dymes_1.hdx");
+
+    // The next time the store is opened both are rebuilt
+    var reopened_ulid_idx = try SegmentsUlidIndex.init(allocator, 10);
+    defer reopened_ulid_idx.deinit(allocator);
+    var reopened = try ReadDataset.open(allocator, frame_allocator, &reopened_ulid_idx, .{ .dir = tmp_dir.dir });
+    defer reopened.close();
+    try reopened.prepareChannelIndex();
+    try reopened.populateSegmentsUlidIndex(&reopened_ulid_idx);
+    try reopened.startHeaderIndex("run");
+    try Check.ready(&reopened, 2);
+    try testing.expect(HeaderIndexFile.valid(allocator, tmp_dir.dir, 0, "run"));
+    try testing.expect(HeaderIndexFile.valid(allocator, tmp_dir.dir, 1, "run"));
+    const rebuilt = try Check.lookup(&reopened, frame_allocator, ids, 1, 0, seg - 1, in_first);
+    try testing.expectEqual(rebuilt.results, rebuilt.fetched);
+
+    // When its channel index file is dropped a segment's header index goes with it, and reads still find the run
+    reopened.mtx_dataset.lock();
+    reopened.dropChannelDirectory(0);
+    reopened.mtx_dataset.unlock();
+    try testing.expect(!reopened.headerIndexReady(0));
+    try testing.expectError(error.FileNotFound, tmp_dir.dir.access("dymes_0.hdx", .{}));
+    const dropped = try Check.lookup(&reopened, frame_allocator, ids, 1, 0, seg - 1, in_first);
+    try testing.expectEqual(rebuilt.results, dropped.results);
 }

@@ -100,12 +100,17 @@ pub const Directory = struct {
     }
 
     pub fn find(self: *const Directory, channel: u128) ?DirEntry {
+        return self.entries[self.findIndex(channel) orelse return null];
+    }
+
+    /// Where in the directory a channel's entry is.
+    pub fn findIndex(self: *const Directory, channel: u128) ?usize {
         var low: usize = 0;
         var high: usize = self.entries.len;
         while (low < high) {
             const mid = (low + high) / 2;
             const mid_channel = self.entries[mid].channel;
-            if (mid_channel == channel) return self.entries[mid];
+            if (mid_channel == channel) return mid;
             if (mid_channel < channel) low = mid + 1 else high = mid;
         }
         return null;
