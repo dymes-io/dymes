@@ -125,6 +125,15 @@ pub fn deinit(self: *Self) void {
 }
 
 pub const AppendError = AccessError || CreationError || DatasetError || StateError || TimeoutError || AllocationError || UsageError;
+/// Releases the engine lock and records for how long it was held.
+fn unlockEngine(self: *Self) void {
+    const held_us = (self.mtx_engine.unlockTimed() orelse return) / std.time.ns_per_us;
+    self.metrics.engine_lock_holds.increment();
+    self.metrics.engine_lock_held_us.incrementBy(held_us);
+    self.metrics.engine_lock_hold_max_us.updateMax(held_us);
+    if (held_us > 10 * std.time.us_per_ms) self.metrics.engine_lock_holds_over_10ms.increment();
+}
+
 pub const AppendOptions = Message.Options;
 
 /// Stores the given message.
@@ -132,7 +141,7 @@ pub const AppendOptions = Message.Options;
 /// If this call fails, this node should go into full cluster recovery.
 pub fn append(self: *Self, msg_channel: u128, msg_routing: u128, msg_body: []const u8, options: AppendOptions) AppendError!Ulid {
     self.mtx_engine.lock();
-    defer self.mtx_engine.unlock();
+    defer self.unlockEngine();
 
     const msg_id = try self.nextMessageId();
 
@@ -141,7 +150,7 @@ pub fn append(self: *Self, msg_channel: u128, msg_routing: u128, msg_body: []con
 
 pub fn import(self: *Self, msg_id: Ulid, msg_channel: u128, msg_routing: u128, msg_body: []const u8, options: Message.Options) AppendError!Ulid {
     self.mtx_engine.lock();
-    defer self.mtx_engine.unlock();
+    defer self.unlockEngine();
 
     return try self.storeLocked(msg_id, msg_channel, msg_routing, msg_body, options, true);
 }
@@ -220,7 +229,7 @@ pub fn appendBatch(self: *Self, entries: []const BatchEntry, ids: []Ulid, writte
     }
 
     self.mtx_engine.lock();
-    defer self.mtx_engine.unlock();
+    defer self.unlockEngine();
 
     for (entries, 0..) |entry, i| {
         try self.checkFrameSize(entry.body, entry.options);
@@ -297,7 +306,7 @@ pub const QueryExecutionError = AccessError || CreationError || StateError || Us
 pub fn query(self: *Self, request: QueryRequest) QueryExecutionError!*QueryCursor {
     self.metrics.engine_queries_received.increment();
     self.mtx_engine.lock();
-    defer self.mtx_engine.unlock();
+    defer self.unlockEngine();
 
     const cursor = try self.query_subsystem.execute(request);
     self.metrics.engine_queries_ok.increment();
@@ -321,7 +330,7 @@ pub const CursorStep = QueryCursor.Step;
 /// a read that matches few messages gives way to appends and other reads after every message it examines.
 pub fn stepCursor(self: *Self, traversal_request: CursorTraversalRequest) CursorTraversalError!CursorStep {
     self.mtx_engine.lock();
-    defer self.mtx_engine.unlock();
+    defer self.unlockEngine();
 
     return traversal_request.cursor.step() catch |e| {
         self.logger.err()

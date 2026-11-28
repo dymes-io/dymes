@@ -60,7 +60,7 @@ four CPUs.
 | `channel-read` | Reads a channel of dozens of messages, a mid-sized one and the largest, whole and for the last day. | The time follows the channel's messages, not the store's: a small channel reads in under 100 ms on a store of any size. |
 | `tracking-lookup` | Finds a run by its `tracking_id` header on its channel: over the run's own range, over a day, and to the store's end. | Under 1 s on the largest channel over a day. |
 | `sparse-routing` | Reads the whole store with a routing filter that matches almost nothing, while another client appends every 20 ms. | Appends take as long during the scan as before it. |
-| `mixed-load` | An appender, 23 consumers each following a channel, two lookups by tracking id and a sparse routing consumer, together. | Appends under 100 ms at the 99th percentile and under 1 s at worst. |
+| `mixed-load` | An appender, 23 consumers each following a channel, two lookups by tracking id and a sparse routing consumer, together. | Appends under 100 ms at the 99th percentile and under 1 s at worst. The engine lock held for over 10 ms by fewer than one request in a hundred, and never for 50 ms (`engine_lock_*` metrics). |
 | `newest` | A channel query starting at the store's newest message, and channel and range queries whose range ends before it starts. | The message comes back, the inverted ranges are refused, and the node still answers. |
 | `rollover` | Appends 300,000 messages on two channels, so the node rolls over to a new segment while serving, then reads both channels and a generated one. | Every message once, in order. |
 | `cursor-leak` | Opens 32 cursors, reads a batch from each and goes away without closing them. | No cursor is open once the idle limit has passed. |
