@@ -25,6 +25,7 @@ pub const SegmentsUlidIndex = @import("dymes_msg_store/SegmentsUlidIndex.zig");
 pub const MessageLocation = @import("dymes_msg_store/MessageLocation.zig");
 pub const ChannelIndex = @import("dymes_msg_store/ChannelIndex.zig");
 pub const ChannelIndexFile = @import("dymes_msg_store/ChannelIndexFile.zig");
+pub const HeaderIndexFile = @import("dymes_msg_store/HeaderIndexFile.zig");
 pub const JournalFile = @import("dymes_msg_store/JournalFile.zig");
 
 pub const DataSegmentsCache = @import("dymes_msg_store/DataSegmentsCache.zig");

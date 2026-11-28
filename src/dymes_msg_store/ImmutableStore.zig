@@ -114,6 +114,15 @@ pub fn open(gpa: std.mem.Allocator, frame_allocator: std.mem.Allocator, options:
     // which appends keep up to date, before the stack copy goes away.
     new_self.read_dataset.segments_ulid_idx = &new_self.segments_ulid_idx;
     new_self.read_dataset.warmActiveSegment();
+    if (options.indexed_header) |key| {
+        new_self.read_dataset.startHeaderIndex(key) catch |e| {
+            logger.warn()
+                .msg("Failed to start the header index; channel reads by header fetch every frame")
+                .err(e)
+                .str("header", key)
+                .log();
+        };
+    }
 
     const health_provider = ComponentHealthProvider.init(component_name, new_self, healthProbe);
 

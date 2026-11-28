@@ -215,3 +215,28 @@ To filter for only Agent Appointment messages (message type `010`), regardless o
 | `000_111_000`| `000_010_000`      | All Agent Appointment messages (DA, DC and MOP) |
 
 This isolates the middle 3 bits (message type) and checks if they equal `010`, matching all three Agent Appointment messages while excluding Registration Pending and Agent Appointment Confirmation.
+
+## The indexed header
+
+A channel query with a filter on a header reads every message of the channel in its range and checks each one.
+For one header, the node can do better: set `engine.store.indexed_header` to the header's name, and a channel
+query that asks for one value of that header (a `kv_filter` with `eql`) fetches only the messages that carry it.
+
+```yaml
+engine:
+  store:
+    indexed_header: "tracking_id"
+```
+
+The node keeps, beside each closed segment, a file `dymes_<n>.hdx` holding a 4-byte hash of every message's value
+of that header (4 bytes a message: about 1 MiB a segment). The files are derived from the message files:
+
+- A node started with the option builds the missing ones in the background, the newest segment first, resting
+  between segments so that requests keep half the disk. It serves at once; a read of a segment whose file is not
+  ready checks every message, as before. The log says "Segment header indexes ready" when all are.
+- A file that is damaged, or was built for another header, is rebuilt. Removing the option leaves the files unused;
+  they can be deleted.
+- The segment being appended to has none, and is read as before.
+- A node without the option, or an older node, ignores the files.
+
+Other filters, and queries that are not channel queries, are unaffected.

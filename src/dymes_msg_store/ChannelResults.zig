@@ -111,12 +111,13 @@ pub const Iterator = struct {
 
         return .{
             .filters = channel_results.filters,
-            .channel_it = try channel_results.read_dataset.channelIterator(
+            .channel_it = try channel_results.read_dataset.channelIteratorFor(
                 channel_results.channel_id,
                 channel_results.first_ulid,
                 channel_results.final_ulid,
                 channel_results.first_segment,
                 channel_results.last_segment,
+                channel_results.read_dataset.headerHashFor(channel_results.filters),
             ),
             .frame_allocator = channel_results.frame_allocator,
             .msg_buffer = msg_buffer,
@@ -142,7 +143,11 @@ pub const Iterator = struct {
 
     /// Examines the next stored message: a result, one the filters reject, or the end.
     pub fn step(self: *Iterator) IteratorError!QueryCursor.Step {
-        const _msg = try self.channel_it.next() orelse return .end;
+        const _msg = switch (try self.channel_it.step()) {
+            .message => |stored| stored,
+            .skipped => return .skipped,
+            .end => return .end,
+        };
         for (self.filters) |filter| {
             if (!filter.apply(_msg)) {
                 return .skipped;

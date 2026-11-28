@@ -362,7 +362,7 @@ pub fn buildStoreOptions(logger: *logging.Logger, allocator: std.mem.Allocator, 
         };
     };
 
-    return msg_store.MessageStoreOptions.init(allocator, engine_store_dir, data_path, health) catch |e| {
+    var store_options = msg_store.MessageStoreOptions.init(allocator, engine_store_dir, data_path, health) catch |e| {
         logger.err()
             .msg("Failed to prepare message store options")
             .err(e)
@@ -370,4 +370,6 @@ pub fn buildStoreOptions(logger: *logging.Logger, allocator: std.mem.Allocator, 
             .log();
         return e;
     };
+    store_options.indexed_header = try store_config.asString("indexed_header");
+    return store_options;
 }

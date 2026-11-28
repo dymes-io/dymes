@@ -36,6 +36,10 @@ data_dir: std.fs.Dir,
 /// Health monitor
 health: *Health,
 
+/// The header the store keeps a hash index of, for channel reads that ask for one value of it; none if null.
+/// Borrowed: it must outlive the opening of the store.
+indexed_header: ?[]const u8 = null,
+
 pub fn init(
     allocator: std.mem.Allocator,
     data_dir: std.fs.Dir,
