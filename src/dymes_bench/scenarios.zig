@@ -28,6 +28,8 @@ pub const Options = struct {
     max_messages: u64 = 50_000,
     /// Seconds each phase of a load scenario lasts
     seconds: u64 = 10,
+    /// How often `soak` reports
+    report_seconds: u64 = 3600,
     /// The node's metrics endpoint
     metrics_url: []const u8 = "http://127.0.0.1:6502/observe/metrics",
     /// Where `crash-load` records what the node acknowledged, for `crash-verify`, and where
@@ -177,6 +179,8 @@ pub fn run(allocator: Allocator, options: Options) !void {
         try abandonedTraversal(allocator, options, true, &out);
     } else if (std.mem.eql(u8, options.scenario, "hung-up-traversal")) {
         try abandonedTraversal(allocator, options, false, &out);
+    } else if (std.mem.eql(u8, options.scenario, "soak")) {
+        try soak(allocator, options, manifest, &out);
     } else if (std.mem.eql(u8, options.scenario, "mixed-load")) {
         try mixedLoad(allocator, options, manifest, &out);
     } else return error.UnknownScenario;
@@ -512,6 +516,7 @@ const Reader = struct {
     stop: *std.atomic.Value(bool),
     latencies: std.array_list.Managed(u64),
     failures: u64 = 0,
+    mutex: std.Thread.Mutex = .{},
 
     fn loop(self: *Reader) void {
         var client = Client.init(self.allocator, self.url) catch return;
@@ -540,7 +545,9 @@ const Reader = struct {
                     break :blk readAll(&client, .{ .query_dto = .{ .query_range = .{ .range_start = &from, .range_end = &to } }, .filters = &filters }, std.math.maxInt(u64));
                 },
             };
+            self.mutex.lock();
             if (result) |read| self.latencies.append(read.total_ns) catch {} else |_| self.failures += 1;
+            self.mutex.unlock();
             std.Thread.sleep(500 * std.time.ns_per_ms);
         }
     }
@@ -1059,5 +1066,86 @@ fn appendStorm(allocator: Allocator, options: Options, out: *Out) !void {
     }
     try out.line("{{\"scenario\":\"append-storm\",\"clients\":{d},\"seconds\":{d},\"appended\":{d},\"garbled_responses\":{d},\"connections\":{d},\"ok\":{}}}", .{
         clients, options.seconds, appended, garbled, reconnects, appended > 0 and garbled == 0 and reconnects == clients,
+    });
+}
+
+/// The `mixed-load` clients for `--seconds` (days), reporting every `--report-seconds`. A fit node
+/// never keeps an append waiting 5 s, fails no append and no read, and holds no more cursors at
+/// the end than its clients have open.
+fn soak(allocator: Allocator, options: Options, manifest: Manifest, out: *Out) !void {
+    var appender: Appender = .{ .allocator = allocator, .url = options.url, .latencies = .init(allocator) };
+    defer appender.latencies.deinit();
+    const append_thread = try std.Thread.spawn(.{}, Appender.loop, .{&appender});
+
+    var stop: std.atomic.Value(bool) = .init(false);
+    const tails = 23;
+    const lookups = 2;
+    var readers: [tails + lookups + 1]Reader = undefined;
+    var threads: [tails + lookups + 1]std.Thread = undefined;
+    const lookup_channels = [lookups]usize{ 0, 30 };
+    for (&readers, 0..) |*reader, i| {
+        reader.* = .{ .allocator = allocator, .url = options.url, .kind = .tail, .stop = &stop, .latencies = .init(allocator) };
+        if (i < tails) {
+            reader.channel_id = try manifest.channels[i].channelId();
+            reader.from_ms = manifest.end_ms - std.time.ms_per_hour;
+        } else if (i < tails + lookups) {
+            const channel = manifest.channels[lookup_channels[i - tails]];
+            reader.kind = .lookup;
+            reader.channel_id = try channel.channelId();
+            reader.sample = channel.samples[channel.samples.len / 2];
+        } else {
+            reader.kind = .sparse;
+            reader.from_ms = manifest.end_ms - 6 * std.time.ms_per_hour;
+        }
+    }
+    defer for (&readers) |*reader| reader.latencies.deinit();
+    for (&readers, &threads) |*reader, *thread| thread.* = try std.Thread.spawn(.{}, Reader.loop, .{reader});
+
+    var elapsed_s: u64 = 0;
+    var appends: u64 = 0;
+    var reads: u64 = 0;
+    var worst_append_ms: f64 = 0;
+    var slow_intervals: u64 = 0;
+    var read_failures: u64 = 0;
+    var open_cursors: i64 = -1;
+    while (elapsed_s < options.seconds) {
+        const interval = @min(options.report_seconds, options.seconds - elapsed_s);
+        std.Thread.sleep(interval * std.time.ns_per_s);
+        elapsed_s += interval;
+
+        const appended = appender.drain();
+        appends += appended.count;
+        worst_append_ms = @max(worst_append_ms, appended.max_ms);
+        if (appended.max_ms >= 5000 or appended.count == 0) slow_intervals += 1;
+        var interval_reads: u64 = 0;
+        var worst_read_ns: u64 = 0;
+        var failures: u64 = 0;
+        for (&readers) |*reader| {
+            reader.mutex.lock();
+            defer reader.mutex.unlock();
+            interval_reads += reader.latencies.items.len;
+            for (reader.latencies.items) |latency| worst_read_ns = @max(worst_read_ns, latency);
+            reader.latencies.clearRetainingCapacity();
+            failures += reader.failures;
+        }
+        reads += interval_reads;
+        read_failures = failures;
+        appender.mutex.lock();
+        const append_failures = appender.failures;
+        appender.mutex.unlock();
+        open_cursors = metric(allocator, options.metrics_url, "http_cursors_open") orelse -1;
+        try out.line("{{\"scenario\":\"soak\",\"elapsed_s\":{d},\"appends\":{d},\"append_p99_ms\":{d:.1},\"append_max_ms\":{d:.1},\"append_failures\":{d},\"reads\":{d},\"read_max_ms\":{d:.1},\"read_failures\":{d},\"open_cursors\":{d}}}", .{
+            elapsed_s, appended.count, appended.p99_ms, appended.max_ms, append_failures, interval_reads, ms(worst_read_ns), failures, open_cursors,
+        });
+    }
+    stop.store(true, .monotonic);
+    for (&threads) |*thread| thread.join();
+    appender.stop.store(true, .monotonic);
+    append_thread.join();
+    open_cursors = metric(allocator, options.metrics_url, "http_cursors_open") orelse -1;
+
+    try out.line("{{\"scenario\":\"soak\",\"seconds\":{d},\"appends\":{d},\"append_max_ms\":{d:.1},\"append_failures\":{d},\"intervals_with_a_5s_append\":{d},\"reads\":{d},\"read_failures\":{d},\"open_cursors_at_end\":{d},\"ok\":{}}}", .{
+        elapsed_s,                                                                                                                 appends, worst_append_ms, appender.failures, slow_intervals, reads, read_failures, open_cursors,
+        appends > 0 and reads > 0 and slow_intervals == 0 and appender.failures == 0 and read_failures == 0 and open_cursors <= 0,
     });
 }

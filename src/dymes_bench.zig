@@ -20,7 +20,7 @@ const usage =
     \\  dymes_bench gen --dir <store dir> --manifest <file> [--messages <n>] [--channels <n>]
     \\                  [--seed <n>] [--days <n>] [--end-ms <ms since epoch>]
     \\  dymes_bench run <scenario> --url <http://host:port> --manifest <file>
-    \\                  [--repeat <n>] [--max-messages <n>] [--seconds <n>]
+    \\                  [--repeat <n>] [--max-messages <n>] [--seconds <n>] [--report-seconds <n>]
     \\                  [--metrics-url <url>] [--state <file>]
     \\
     \\Scenarios: channel-read, tracking-lookup, sparse-routing, newest, cursor-leak,
@@ -93,6 +93,8 @@ pub fn main() !void {
                 options.max_messages = try std.fmt.parseUnsigned(u64, value, 10);
             } else if (std.mem.eql(u8, name, "--seconds")) {
                 options.seconds = try std.fmt.parseUnsigned(u64, value, 10);
+            } else if (std.mem.eql(u8, name, "--report-seconds")) {
+                options.report_seconds = try std.fmt.parseUnsigned(u64, value, 10);
             } else if (std.mem.eql(u8, name, "--metrics-url")) {
                 options.metrics_url = value;
             } else if (std.mem.eql(u8, name, "--state")) {
