@@ -20,6 +20,7 @@ next_ticket: u64 = 0,
 now_serving: u64 = 0,
 holder: ?std.Thread.Id = null,
 depth: usize = 0,
+held_since: ?std.time.Instant = null,
 
 pub const init: Self = .{};
 
@@ -39,19 +40,28 @@ pub fn lock(self: *Self) void {
     }
     self.holder = me;
     self.depth = 1;
+    self.held_since = std.time.Instant.now() catch null;
 }
 
 pub fn unlock(self: *Self) void {
+    _ = self.unlockTimed();
+}
+
+/// Unlocks, and returns for how many nanoseconds the lock was held if this released it: null when the holder
+/// still holds it (it had re-entered), or the clock could not be read.
+pub fn unlockTimed(self: *Self) ?u64 {
     self.mutex.lock();
     defer self.mutex.unlock();
 
     assert(self.holder == std.Thread.getCurrentId() and self.depth > 0);
     self.depth -= 1;
-    if (self.depth == 0) {
-        self.holder = null;
-        self.now_serving += 1;
-        self.turn.broadcast();
-    }
+    if (self.depth > 0) return null;
+    self.holder = null;
+    self.now_serving += 1;
+    self.turn.broadcast();
+    const since = self.held_since orelse return null;
+    const now = std.time.Instant.now() catch return null;
+    return now.since(since);
 }
 
 test "FairLock: re-entrant, exclusive, and first come first served" {
@@ -59,7 +69,7 @@ test "FairLock: re-entrant, exclusive, and first come first served" {
 
     fair_lock.lock();
     fair_lock.lock();
-    fair_lock.unlock();
+    try testing.expectEqual(null, fair_lock.unlockTimed());
 
     // Waiters queue up one by one behind the holder, then run in that order
     const Waiter = struct {
@@ -89,7 +99,7 @@ test "FairLock: re-entrant, exclusive, and first come first served" {
         }
     }
     try testing.expectEqual(0, order.items.len);
-    fair_lock.unlock();
+    try testing.expect(fair_lock.unlockTimed() != null);
     for (&threads) |*thread| thread.join();
     try testing.expectEqualSlices(usize, &.{ 0, 1, 2, 3, 4, 5, 6, 7 }, order.items);
 }

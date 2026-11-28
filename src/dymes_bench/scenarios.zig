@@ -612,6 +612,18 @@ fn mixedLoad(allocator: Allocator, options: Options, manifest: Manifest, out: *O
         options.seconds,                                             idle.count, idle.p50_ms, idle.p99_ms, idle.max_ms, busy.count, busy.p50_ms, busy.p99_ms, busy.max_ms, appender.failures,
         busy.count > 0 and busy.p99_ms < 100 and busy.max_ms < 1000,
     });
+    // How long requests held the engine lock, over the node's life so far (the idle appends included)
+    if (metric(allocator, options.metrics_url, "engine_lock_holds")) |holds| {
+        const over = metric(allocator, options.metrics_url, "engine_lock_holds_over_10ms") orelse -1;
+        const max_us = metric(allocator, options.metrics_url, "engine_lock_hold_max_us") orelse -1;
+        const held_us = metric(allocator, options.metrics_url, "engine_lock_held_us") orelse -1;
+        try out.line("{{\"scenario\":\"mixed-load\",\"phase\":\"engine-lock\",\"holds\":{d},\"holds_over_10ms\":{d},\"mean_hold_us\":{d:.1},\"max_hold_ms\":{d:.1},\"ok\":{}}}", .{
+            holds,                                                                                   over,
+            if (holds > 0) @as(f64, @floatFromInt(held_us)) / @as(f64, @floatFromInt(holds)) else 0, @as(f64, @floatFromInt(max_us)) / 1000,
+            // The 99th percentile is under 10 ms when fewer than one hold in a hundred is over it
+            over >= 0 and over * 100 < holds and max_us < 50_000,
+        });
+    }
     for ([_]Reader.Kind{ .tail, .lookup, .sparse }) |kind| {
         var all = std.array_list.Managed(u64).init(allocator);
         defer all.deinit();
