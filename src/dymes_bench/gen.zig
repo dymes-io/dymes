@@ -247,7 +247,11 @@ pub fn run(allocator: Allocator, options: Options) !void {
 
     if (options.channels < 64) return error.TooFewChannels;
 
-    std.fs.cwd().makePath(options.dir) catch {};
+    std.fs.cwd().makePath(options.dir) catch |e| {
+        try stderr.print("gen: cannot create {s}: {s}\n", .{ options.dir, @errorName(e) });
+        try stderr.flush();
+        return e;
+    };
     var dir = try std.fs.cwd().openDir(options.dir, .{ .iterate = true });
     defer dir.close();
     {

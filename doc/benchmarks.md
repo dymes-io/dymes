@@ -89,6 +89,18 @@ for example `sudo mount -t tmpfs -o size=2100m tmpfs /mnt/small` for the 1.6 GiB
 message at a time over kept-alive connections for `--seconds`, and check every byte of every
 response (the status line, the length, a message id and nothing after it).
 
+## Soak
+
+```sh
+BENCH_ARGS="--seconds 604800" nohup scripts/bench/run.sh /data/bench/full /data/bench/full.json results soak &
+```
+
+`soak` runs the `mixed-load` clients for `--seconds` and prints a line every `--report-seconds`
+(an hour): the appends and reads of that interval, their slowest, any failures, and the cursors
+the node holds. A fit node never keeps an append waiting 5 s, fails no append and no read, and
+holds no cursor once its clients have stopped. At about 40 appends a second a week adds some 25
+million messages, about 15 GiB.
+
 Every scenario prints `"ok"`: whether the node met what the scenario checks. Options:
 `--repeat` (reads per case), `--max-messages` (where a read of a large channel stops),
 `--seconds` (how long a load phase lasts) and `--metrics-url`.
